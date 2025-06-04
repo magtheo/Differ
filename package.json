@@ -1,7 +1,7 @@
 {
   "name": "differ",
   "displayName": "Differ",
-  "description": "",
+  "description": "Apply LLM-generated code changes safely with preview and rollback capabilities",
   "version": "0.0.1",
   "engines": {
     "vscode": "^1.100.0"
@@ -9,20 +9,100 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
       {
-        "command": "differ.helloWorld",
-        "title": "Hello World"
+        "command": "differ.openPanel",
+        "title": "Open LLM Code Patcher",
+        "category": "LLM Code Patcher"
+      },
+      {
+        "command": "differ.applyChanges",
+        "title": "Apply Changes",
+        "category": "LLM Code Patcher"
+      },
+      {
+        "command": "differ.clearChanges",
+        "title": "Clear Changes",
+        "category": "LLM Code Patcher"
+      },
+      {
+        "command": "differ.showHistory",
+        "title": "Show Change History",
+        "category": "LLM Code Patcher"
+      },
+      {
+        "command": "differ.undoLastChanges",
+        "title": "Undo Last Changes",
+        "category": "LLM Code Patcher"
       }
-    ]
+    ],
+    "views": {
+      "explorer": [
+        {
+          "type": "webview",
+          "id": "differ-panel",
+          "name": "LLM Code Patcher",
+          "when": "true"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "differ",
+          "title": "LLM Code Patcher",
+          "icon": "$(diff)"
+        }
+      ]
+    },
+    "views": {
+      "differ": [
+        {
+          "type": "webview",
+          "id": "differ-panel",
+          "name": "Code Patcher",
+          "when": "true"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "LLM Code Patcher",
+      "properties": {
+        "differ.logLevel": {
+          "type": "string",
+          "enum": ["debug", "info", "warn", "error"],
+          "default": "info",
+          "description": "Set the logging level for the extension"
+        },
+        "differ.autoBackup": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically create backups before applying changes"
+        },
+        "differ.confirmBeforeApply": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show confirmation dialog before applying changes"
+        },
+        "differ.maxHistoryEntries": {
+          "type": "number",
+          "default": 100,
+          "description": "Maximum number of history entries to keep"
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
+    "compile-webview": "npm run compile && npm run copy-webview",
+    "copy-webview": "mkdir -p out/webview && cp src/webview/* out/webview/",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src",
     "test": "vscode-test"
