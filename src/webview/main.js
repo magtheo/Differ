@@ -292,19 +292,17 @@ function renderChangesList() {
 function createChangeElement(change) {
     const div = document.createElement('div');
     div.className = 'change-item';
-    
+
     const isSelected = currentState.selectedChanges.includes(change.id);
-    
-    // Ensure code is treated as text to prevent XSS if it contains HTML-like structures
-    const codeText = change.code || ''; 
+    const codeText = change.code || '';
 
     div.innerHTML = `
-        <input 
-            type="checkbox" 
-            class="change-checkbox" 
+        <input
+            type="checkbox"
+            class="change-checkbox"
             data-change-id="${change.id}"
             ${isSelected ? 'checked' : ''}
-            ${currentState.isLoading ? 'disabled' : ''} 
+            ${currentState.isLoading ? 'disabled' : ''}
         >
         <div class="change-content">
             <div class="change-header">
@@ -323,16 +321,26 @@ function createChangeElement(change) {
                 <pre class="code-preview-content">${escapeHtml(codeText.substring(0, 200) + (codeText.length > 200 ? '...' : ''))}</pre>
             </div> -->
             <div class="change-actions">
-                <button onclick="handlePreviewChange('${change.id}')" class="secondary" ${currentState.isLoading ? 'disabled' : ''}>Preview</button>
+                <button class="secondary preview-btn" data-change-id="${change.id}" ${currentState.isLoading ? 'disabled' : ''}>Preview</button>
             </div>
         </div>
     `;
-    
+
     const checkbox = div.querySelector('.change-checkbox');
     if (checkbox) {
         checkbox.addEventListener('change', handleChangeCheckboxChange);
     }
-    
+
+    // Add event listener for the preview button
+    const previewButton = div.querySelector('.preview-btn');
+    if (previewButton) {
+        previewButton.addEventListener('click', (event) => {
+            const changeId = event.currentTarget.dataset.changeId;
+            if (changeId && !currentState.isLoading) {
+                handlePreviewChange(changeId);
+            }
+        });
+    }
     return div;
 }
 

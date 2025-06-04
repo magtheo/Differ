@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { UIStateManager, PendingChange, ParsedInput } from './stateManager'; // Added ParsedInput and PendingChange for clarity
+import { UIStateManager, PendingChange, ParsedInput } from './stateManager';
 import { Logger } from '../utils/logger';
 
 export class DifferProvider implements vscode.WebviewViewProvider {
@@ -244,26 +244,115 @@ export class DifferProvider implements vscode.WebviewViewProvider {
     }
     
     private async _handlePreviewChange(data: { changeId: string }) {
-        this._logger.info('Handling previewChange message', { changeId: data.changeId });
+        this._logger.info('Handling previewChange message (Entered _handlePreviewChange)', { changeId: data.changeId });
         const change = this._stateManager.getState().pendingChanges.find(c => c.id === data.changeId);
+
         if (!change) {
             this._logger.warn('Preview requested for non-existent change ID', { changeId: data.changeId });
             vscode.window.showErrorMessage(`Cannot preview change: ID ${data.changeId} not found.`);
             return;
         }
+
         try {
-            // TODO: Implement actual preview generation when diff engine is built
-            this._logger.info('Preview requested for change', { changeId: data.changeId, changeDetails: change });
-            
-            // For now, just show a placeholder with change details
-            vscode.window.showInformationMessage(
-                `Preview for change ${data.changeId}:\nFile: ${change.file}\nAction: ${change.action}\nTarget: ${change.target}\n(Full preview not yet implemented)`
-            );
-            
-        } catch (error) {
+            const workspaceFolders = vscode.workspace.workspaceFolders;
+            if (!workspaceFolders || workspaceFolders.length === 0) {
+                vscode.window.showErrorMessage("No workspace folder open to preview changes.");
+                this._logger.warn("Preview failed: No workspace folder open.");
+                return;
+            }
+            // Use the first workspace folder as the root for relative file paths
+            const workspaceRoot = workspaceFolders[0].uri;
+            const originalFileUri = vscode.Uri.joinPath(workspaceRoot, change.file);
+
+            this._logger.info(`Constructed originalFileUri for preview: ${originalFileUri.fsPath}`, {
+                workspaceRoot: workspaceRoot.fsPath,
+                changeFile: change.file
+            });
+
+            let originalDocument: vscode.TextDocument;
+            try {
+                originalDocument = await vscode.workspace.openTextDocument(originalFileUri);
+            } catch (e: any) {
+                this._logger.error(`Failed to open original file for preview: ${originalFileUri.fsPath}`, e);
+                vscode.window.showErrorMessage(`File not found or could not be opened: ${change.file}. Cannot generate preview. Error: ${e.message}`);
+                return;
+            }
+            const originalContent = originalDocument.getText();
+            let modifiedContent = originalContent; // Start with original content
+
+            let unableToPreviewReason: string | null = null;
+            const EOL = originalDocument.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n';
+
+            // Apply transformations to generate modifiedContent based on change.action
+            if (change.action.toLowerCase().includes('replace')) {
+                if (change.target && change.target.length > 0) {
+                    const targetIndex = originalContent.indexOf(change.target);
+                    if (targetIndex !== -1) {
+                        // Simple string replacement. This assumes change.target is the exact string of the old code.
+                        modifiedContent = originalContent.substring(0, targetIndex) +
+                                          change.code +
+                                          originalContent.substring(targetIndex + change.target.length);
+                    } else {
+                        unableToPreviewReason = `Target text to replace was not found in ${change.file}.\nTarget (first 100 chars): "${change.target.substring(0, 100)}..."`;
+                        modifiedContent = `// PREVIEW NOTE: ${unableToPreviewReason}${EOL}// Proposed code change below:${EOL}${change.code}${EOL}// --- Original File Content ---${EOL}${originalContent}`;
+                    }
+                } else {
+                    unableToPreviewReason = `'target' for replacement is empty or missing. Cannot determine what to replace.`;
+                    modifiedContent = `// PREVIEW NOTE: ${unableToPreviewReason}${EOL}// Proposed code change below:${EOL}${change.code}${EOL}// --- Original File Content ---${EOL}${originalContent}`;
+                }
+            } else if (change.action.toLowerCase().includes('add') || change.action.toLowerCase().includes('insert')) {
+                if (change.target && change.target.toLowerCase().startsWith('line:')) {
+                    const lineNumberStr = change.target.substring('line:'.length);
+                    const lineNumber = parseInt(lineNumberStr, 10); // 1-indexed
+
+                    if (!isNaN(lineNumber) && lineNumber >= 1) {
+                        const lines = originalContent.split(EOL);
+                        // Convert 1-indexed lineNumber to 0-indexed spliceIndex
+                        // Allow inserting at lines.length (which means after the last line)
+                        const spliceIndex = Math.max(0, Math.min(lineNumber - 1, lines.length));
+
+                        lines.splice(spliceIndex, 0, change.code);
+                        modifiedContent = lines.join(EOL);
+                    } else {
+                        unableToPreviewReason = `Invalid line number in target: '${change.target}'. Appending proposed code instead.`;
+                        modifiedContent = originalContent + (originalContent.length > 0 ? EOL : '') + `// --- Proposed Code (appended due to invalid line target for '${change.action}') ---${EOL}${change.code}`;
+                    }
+                } else { // Default 'add' behavior: append to end of file
+                    modifiedContent = originalContent + (originalContent.length > 0 ? EOL : '') + change.code;
+                }
+            } else {
+                // Fallback for actions not explicitly handled for precise modification
+                unableToPreviewReason = `Action '${change.action}' is not fully supported for precise diff preview. Showing proposed code appended.`;
+                modifiedContent = originalContent + (originalContent.length > 0 ? EOL : '') +
+                                  `// --- Proposed Code for action '${change.action}' (appended due to limited preview support) ---${EOL}` +
+                                  `// Target: ${change.target}${EOL}` +
+                                  `${change.code}`;
+            }
+
+            if (unableToPreviewReason) {
+                this._logger.warn(`Preview limitation for change ${change.id}: ${unableToPreviewReason}`, { change });
+                vscode.window.showWarningMessage(`Preview for ${change.file}: ${unableToPreviewReason} The diff view may show explanatory comments.`);
+            }
+
+            const diffTitle = `Preview: ${path.basename(change.file)} (${change.action})`;
+
+            // Create an in-memory document for the modified content.
+            // VS Code will handle its lifecycle for the diff view.
+            const modifiedDoc = await vscode.workspace.openTextDocument({
+                content: modifiedContent,
+                language: originalDocument.languageId // Use language of original file for syntax highlighting
+            });
+
+            // Show the diff
+            await vscode.commands.executeCommand('vscode.diff', originalDocument.uri, modifiedDoc.uri, diffTitle);
+            this._logger.info(`Showing diff for ${change.id}: ${originalDocument.uri.fsPath} vs. untitled (preview)`);
+
+        } catch (error: any) {
             const errorMessage = error instanceof Error ? error.message : String(error);
-            this._logger.error('Failed to generate preview', { error: errorMessage, originalError: error });
-            this._stateManager.setError(`Preview error: ${errorMessage}`);
+            this._logger.error('Failed to generate preview (outer catch)', { error: errorMessage, originalError: error, changeId: data.changeId });
+            // You might want to update the state manager's error here if you have a way to display it for this specific change
+            // this._stateManager.updatePendingChangeStatus(data.changeId, 'error', `Preview failed: ${errorMessage}`);
+            vscode.window.showErrorMessage(`Failed to generate preview for change ${data.changeId}: ${errorMessage}`);
         }
     }
     
