@@ -92,9 +92,11 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "compile-webview": "npm run compile && npm run copy-webview",
-    "copy-webview": "mkdir -p out/webview && cp src/webview/* out/webview/ 2>/dev/null || true",
+    "copy-webview": "mkdir -p out/webview && cp -r src/webview/* out/webview/ 2>/dev/null || (mkdir -p out/webview && echo 'No webview files to copy')",
+    "clean": "rm -rf out/",
+    "rebuild": "npm run clean && npm run compile-webview",
     "pretest": "npm run compile && npm run lint",
-    "lint": "eslint src",
+    "lint": "eslint src --ext .ts",
     "test": "vscode-test"
   },
   "devDependencies": {
