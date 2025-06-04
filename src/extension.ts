@@ -7,7 +7,7 @@ let webViewProvider: DifferProvider;
 
 export function activate(context: vscode.ExtensionContext) {
     // Initialize logger first
-    logger = new Logger('Differ');
+    logger = new Logger('LLM Code Patcher');
     logger.info('Extension activation started');
 
     try {
@@ -26,7 +26,7 @@ export function activate(context: vscode.ExtensionContext) {
         const hasShownWelcome = context.globalState.get('hasShownWelcome', false);
         if (!hasShownWelcome) {
             vscode.window.showInformationMessage(
-                'Differ is ready! Open the panel from the Activity Bar to get started.',
+                'LLM Code Patcher is ready! Open the panel from the Activity Bar to get started.',
                 'Open Panel'
             ).then(selection => {
                 if (selection === 'Open Panel') {
@@ -38,7 +38,7 @@ export function activate(context: vscode.ExtensionContext) {
         
     } catch (error) {
         logger.error('Failed to activate extension', error);
-        vscode.window.showErrorMessage(`Failed to activate Differ: ${error}`);
+        vscode.window.showErrorMessage(`Failed to activate LLM Code Patcher: ${error}`);
     }
 }
 
@@ -88,18 +88,21 @@ function registerCommands(context: vscode.ExtensionContext) {
     
     // Clear changes command
     const clearChangesCommand = vscode.commands.registerCommand('differ.clearChanges', () => {
+        logger.info('Clear changes command triggered');
         webViewProvider.clearChanges();
         vscode.window.showInformationMessage('Pending changes cleared');
     });
     
     // Show change history command
     const showHistoryCommand = vscode.commands.registerCommand('differ.showHistory', () => {
+        logger.info('Show history command triggered');
         // TODO: Implement history display
         vscode.window.showInformationMessage('Change history (not yet implemented)');
     });
     
     // Undo last changes command
     const undoChangesCommand = vscode.commands.registerCommand('differ.undoLastChanges', () => {
+        logger.info('Undo changes command triggered');
         // TODO: Implement undo functionality
         vscode.window.showInformationMessage('Undo changes (not yet implemented)');
     });

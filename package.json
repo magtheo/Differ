@@ -17,45 +17,35 @@
     "commands": [
       {
         "command": "differ.openPanel",
-        "title": "Open LLM Code Patcher",
-        "category": "LLM Code Patcher"
+        "title": "Open Differ",
+        "category": "Differ"
       },
       {
         "command": "differ.applyChanges",
         "title": "Apply Changes",
-        "category": "LLM Code Patcher"
+        "category": "Differ"
       },
       {
         "command": "differ.clearChanges",
         "title": "Clear Changes",
-        "category": "LLM Code Patcher"
+        "category": "Differ"
       },
       {
         "command": "differ.showHistory",
         "title": "Show Change History",
-        "category": "LLM Code Patcher"
+        "category": "Differ"
       },
       {
         "command": "differ.undoLastChanges",
         "title": "Undo Last Changes",
-        "category": "LLM Code Patcher"
+        "category": "Differ"
       }
     ],
-    "views": {
-      "explorer": [
-        {
-          "type": "webview",
-          "id": "differ-panel",
-          "name": "LLM Code Patcher",
-          "when": "true"
-        }
-      ]
-    },
     "viewsContainers": {
       "activitybar": [
         {
           "id": "differ",
-          "title": "LLM Code Patcher",
+          "title": "Differ",
           "icon": "$(diff)"
         }
       ]
@@ -71,7 +61,7 @@
       ]
     },
     "configuration": {
-      "title": "LLM Code Patcher",
+      "title": "Differ",
       "properties": {
         "differ.logLevel": {
           "type": "string",
@@ -102,7 +92,7 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "compile-webview": "npm run compile && npm run copy-webview",
-    "copy-webview": "mkdir -p out/webview && cp src/webview/* out/webview/",
+    "copy-webview": "mkdir -p out/webview && cp src/webview/* out/webview/ 2>/dev/null || true",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src",
     "test": "vscode-test"
