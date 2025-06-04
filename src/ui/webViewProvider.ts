@@ -4,7 +4,7 @@ import { UIStateManager } from './stateManager';
 import { Logger } from '../utils/logger';
 
 export class DifferProvider implements vscode.WebviewViewProvider {
-    public static readonly viewType = 'differ-panel';
+    public static readonly viewType = 'llm-code-patcher-panel';
     
     private _view?: vscode.WebviewView;
     private _stateManager: UIStateManager;
@@ -25,7 +25,7 @@ export class DifferProvider implements vscode.WebviewViewProvider {
     
     public resolveWebviewView(
         webviewView: vscode.WebviewView,
-        context: vscode.WebviewViewResolveContext,
+        _context: vscode.WebviewViewResolveContext,
         _token: vscode.CancellationToken,
     ) {
         this._view = webviewView;
@@ -135,7 +135,7 @@ export class DifferProvider implements vscode.WebviewViewProvider {
             this._stateManager.setLoading(true);
             
             // TODO: Replace with actual change application when built
-            await vscode.commands.executeCommand('differ.applyChanges', data.selectedChanges);
+            await vscode.commands.executeCommand('llm-code-patcher.applyChanges', data.selectedChanges);
             
             // Mark changes as applied (for now just show success)
             this._stateManager.setError(null);
@@ -195,7 +195,7 @@ export class DifferProvider implements vscode.WebviewViewProvider {
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';">
             <link href="${styleUri}" rel="stylesheet">
-            <title>Differ</title>
+            <title>LLM Code Patcher</title>
         </head>
         <body>
             <div id="app">
