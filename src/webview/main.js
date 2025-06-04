@@ -67,17 +67,27 @@ function attachEventListeners() {
 // Event handlers
 function handleJsonInputChange(event) {
     currentState.jsonInput = event.target.value;
-    elements.parseBtn.disabled = !event.target.value.trim();
+    const hasContent = event.target.value.trim().length > 0;
+    elements.parseBtn.disabled = !hasContent || currentState.isLoading;
+    
+    console.log('Input changed, length:', event.target.value.length, 'Parse button enabled:', hasContent);
 }
 
 function handleParseInput() {
     const jsonInput = elements.jsonInput.value.trim();
-    if (!jsonInput) return;
+    console.log('Parse button clicked, input length:', jsonInput.length);
     
+    if (!jsonInput) {
+        console.warn('No input to parse');
+        return;
+    }
+    
+    console.log('Sending parseInput message with data:', jsonInput.substring(0, 100) + '...');
     sendMessage('parseInput', { jsonInput });
 }
 
 function handleClearInput() {
+    console.log('Clear input button clicked');
     elements.jsonInput.value = '';
     currentState.jsonInput = '';
     elements.parseBtn.disabled = true;
@@ -86,21 +96,31 @@ function handleClearInput() {
 
 function handleApplySelected() {
     const selectedChanges = currentState.selectedChanges;
-    if (selectedChanges.length === 0) return;
+    console.log('Apply selected button clicked, selected changes:', selectedChanges.length);
+    
+    if (selectedChanges.length === 0) {
+        console.warn('No changes selected');
+        return;
+    }
     
     sendMessage('applyChanges', { selectedChanges });
 }
 
 function handleClearChanges() {
+    console.log('Clear changes button clicked');
     sendMessage('clearChanges');
 }
 
 function handleShowHistory() {
-    sendMessage('showHistory');
+    console.log('Show history button clicked');
+    // For now, just show a message since history isn't implemented yet
+    alert('History feature not yet implemented');
 }
 
 function handleUndoLast() {
-    sendMessage('undoLast');
+    console.log('Undo last button clicked');
+    // For now, just show a message since undo isn't implemented yet  
+    alert('Undo feature not yet implemented');
 }
 
 function handleChangeCheckboxChange(event) {
@@ -116,14 +136,17 @@ function handlePreviewChange(changeId) {
 
 // Message handling
 function sendMessage(type, data = {}) {
+    console.log('Sending message to extension:', type, data);
     vscode.postMessage({ type, data });
 }
 
 function handleExtensionMessage(event) {
     const message = event.data;
+    console.log('Received message from extension:', message.type, message);
     
     switch (message.type) {
         case 'stateUpdate':
+            console.log('State update received:', message.state);
             currentState = { ...currentState, ...message.state };
             updateUI();
             break;
@@ -135,12 +158,24 @@ function handleExtensionMessage(event) {
 
 // UI updates
 function updateUI() {
+    console.log('Updating UI with state:', currentState);
     updateStatusSection();
     updateChangesSection();
     updateHistorySection();
+    
+    // Update input field and parse button
+    if (elements.jsonInput && elements.jsonInput.value !== currentState.jsonInput) {
+        elements.jsonInput.value = currentState.jsonInput;
+    }
+    
+    if (elements.parseBtn) {
+        elements.parseBtn.disabled = !currentState.jsonInput.trim() || currentState.isLoading;
+    }
 }
 
 function updateStatusSection() {
+    console.log('Updating status section - loading:', currentState.isLoading, 'error:', currentState.error);
+    
     // Show/hide loading
     if (currentState.isLoading) {
         elements.statusSection.classList.remove('hidden');

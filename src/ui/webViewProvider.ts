@@ -4,7 +4,7 @@ import { UIStateManager } from './stateManager';
 import { Logger } from '../utils/logger';
 
 export class DifferProvider implements vscode.WebviewViewProvider {
-    public static readonly viewType = 'llm-code-patcher-panel';
+    public static readonly viewType = 'differ-panel';
     
     private _view?: vscode.WebviewView;
     private _stateManager: UIStateManager;
@@ -100,31 +100,80 @@ export class DifferProvider implements vscode.WebviewViewProvider {
     }
     
     private async _handleParseInput(inputData: { jsonInput: string }) {
+        this._logger.info('Starting to parse input', { inputLength: inputData.jsonInput.length });
+        
         try {
             this._stateManager.setLoading(true);
+            this._stateManager.setError(null);
             
-            // TODO: Replace with actual JSON parser when built
-            const parsedData = JSON.parse(inputData.jsonInput);
-            
-            // Basic validation
-            if (!parsedData.changes || !Array.isArray(parsedData.changes)) {
-                throw new Error('Invalid format: "changes" array is required');
+            // Validate input is not empty
+            if (!inputData.jsonInput || inputData.jsonInput.trim() === '') {
+                throw new Error('Input cannot be empty');
             }
             
-            // Set parsed changes
-            this._stateManager.setParsedInput(parsedData);
-            this._stateManager.setPendingChanges(parsedData.changes.map((change: any, index: number) => ({
-                ...change,
-                id: `change-${index}`,
-                selected: true,
-                status: 'pending'
-            })));
+            // Parse JSON with better error handling
+            let parsedData;
+            try {
+                parsedData = JSON.parse(inputData.jsonInput.trim());
+            } catch (parseError) {
+                throw new Error(`Invalid JSON format: ${parseError instanceof Error ? parseError.message : parseError}`);
+            }
             
-            this._stateManager.setError(null);
+            // Validate structure
+            if (!parsedData || typeof parsedData !== 'object') {
+                throw new Error('Input must be a valid JSON object');
+            }
+            
+            if (!parsedData.changes) {
+                throw new Error('Missing required "changes" property');
+            }
+            
+            if (!Array.isArray(parsedData.changes)) {
+                throw new Error('"changes" must be an array');
+            }
+            
+            if (parsedData.changes.length === 0) {
+                throw new Error('Changes array cannot be empty');
+            }
+            
+            // Validate each change object
+            parsedData.changes.forEach((change: any, index: number) => {
+                if (!change.file) {
+                    throw new Error(`Change ${index + 1}: Missing required "file" property`);
+                }
+                if (!change.action) {
+                    throw new Error(`Change ${index + 1}: Missing required "action" property`);
+                }
+                if (!change.target) {
+                    throw new Error(`Change ${index + 1}: Missing required "target" property`);
+                }
+                if (!change.code) {
+                    throw new Error(`Change ${index + 1}: Missing required "code" property`);
+                }
+            });
+            
+            // Set parsed input
+            this._stateManager.setParsedInput(parsedData);
+            
+            // Create pending changes with proper IDs
+            const pendingChanges = parsedData.changes.map((change: any, index: number) => ({
+                ...change,
+                id: `change-${Date.now()}-${index}`, // More unique IDs
+                selected: true,
+                status: 'pending' as const
+            }));
+            
+            this._stateManager.setPendingChanges(pendingChanges);
+            
+            this._logger.info('Successfully parsed input', { 
+                changeCount: pendingChanges.length,
+                description: parsedData.description 
+            });
             
         } catch (error) {
             this._logger.error('Failed to parse input', error);
-            this._stateManager.setError(`Parse error: ${error}`);
+            const errorMessage = error instanceof Error ? error.message : `Unknown error: ${error}`;
+            this._stateManager.setError(errorMessage);
         } finally {
             this._stateManager.setLoading(false);
         }
@@ -135,7 +184,7 @@ export class DifferProvider implements vscode.WebviewViewProvider {
             this._stateManager.setLoading(true);
             
             // TODO: Replace with actual change application when built
-            await vscode.commands.executeCommand('llm-code-patcher.applyChanges', data.selectedChanges);
+            await vscode.commands.executeCommand('differ.applyChanges', data.selectedChanges);
             
             // Mark changes as applied (for now just show success)
             this._stateManager.setError(null);

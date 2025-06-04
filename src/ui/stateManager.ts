@@ -40,7 +40,7 @@ export class UIStateManager {
         parsedInput: null,
         pendingChanges: [],
         selectedChanges: [],
-        isLoading: false,
+        isLoading: false, // Initialize as false, not true
         error: null,
         changeHistory: []
     };
@@ -49,7 +49,8 @@ export class UIStateManager {
     public readonly onStateChange = this._onStateChangeEmitter.event;
     
     constructor() {
-        // Initialize state
+        // Initialize state - make sure loading is false initially
+        this._state.isLoading = false;
     }
     
     public dispose() {
