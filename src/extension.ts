@@ -1,148 +1,281 @@
 import * as vscode from 'vscode';
-import { DifferProvider } from './ui/webViewProvider';
-import { Logger } from './utils/logger';
+import { ChangeParser, ParsedInput, ValidationResult } from './parser/inputParser';
 
-let logger: Logger;
-let webViewProvider: DifferProvider;
+interface DifferState {
+    parsedInput: ParsedInput | null;
+    lastValidationResult: ValidationResult | null;
+    previewContent: string | null;
+}
 
 export function activate(context: vscode.ExtensionContext) {
-    // Initialize logger first
-    logger = new Logger('LLM Code Patcher');
-    logger.info('Extension activation started');
+    console.log('🚀 Differ extension is now active!');
+    
+    // Extension state
+    const state: DifferState = {
+        parsedInput: null,
+        lastValidationResult: null,
+        previewContent: null
+    };
 
+    // Register commands
+    const commands = [
+        vscode.commands.registerCommand('differ.openPanel', () => openDifferPanel()),
+        vscode.commands.registerCommand('differ.parseInput', () => parseUserInput(state)),
+        vscode.commands.registerCommand('differ.previewChanges', () => previewChanges(state)),
+        vscode.commands.registerCommand('differ.applyChanges', () => applyChanges(state)),
+        vscode.commands.registerCommand('differ.clearChanges', () => clearChanges(state))
+    ];
+
+    context.subscriptions.push(...commands);
+}
+
+async function openDifferPanel() {
+    vscode.window.showInformationMessage('Differ Panel - Coming Soon! Use Command Palette commands for now.');
+}
+
+async function parseUserInput(state: DifferState) {
     try {
-        // Initialize modules
-        initializeModules(context);
-        
-        // Register commands
-        registerCommands(context);
-        
-        // Register web view provider
-        registerWebViewProvider(context);
-        
-        logger.info('Extension activated successfully');
-        
-        // Show welcome message on first activation
-        const hasShownWelcome = context.globalState.get('hasShownWelcome', false);
-        if (!hasShownWelcome) {
-            vscode.window.showInformationMessage(
-                'LLM Code Patcher is ready! Open the panel from the Activity Bar to get started.',
-                'Open Panel'
-            ).then(selection => {
-                if (selection === 'Open Panel') {
-                    vscode.commands.executeCommand('differ.openPanel');
-                }
-            });
-            context.globalState.update('hasShownWelcome', true);
+        // Get JSON input from user
+        const jsonInput = await vscode.window.showInputBox({
+            prompt: 'Paste your JSON change input',
+            placeHolder: '{"description": "...", "changes": [...]}',
+            ignoreFocusOut: true
+        });
+
+        if (!jsonInput) {
+            return;
         }
+
+        // Parse input WITHOUT file validation
+        vscode.window.showInformationMessage('Parsing input...');
         
+        const parsedInput = ChangeParser.parseInput(jsonInput);
+        
+        // Validate structure only
+        const structureValidation = ChangeParser.validateStructure(parsedInput);
+        
+        if (!structureValidation.isValid) {
+            vscode.window.showErrorMessage(`Input validation failed: ${structureValidation.errors.join(', ')}`);
+            return;
+        }
+
+        // Show warnings if any
+        if (structureValidation.warnings.length > 0) {
+            const warningMsg = `Warnings: ${structureValidation.warnings.join(', ')}`;
+            vscode.window.showWarningMessage(warningMsg);
+        }
+
+        // Store parsed input
+        state.parsedInput = parsedInput;
+        state.lastValidationResult = structureValidation;
+
+        // Show success with summary
+        const summary = `Parsed successfully! ${parsedInput.changes.length} changes across ${parsedInput.metadata?.affectedFiles.length} files`;
+        vscode.window.showInformationMessage(summary);
+
+        // Generate and store preview
+        state.previewContent = ChangeParser.generatePreview(parsedInput);
+        
+        // Show preview automatically
+        await showPreview(state.previewContent);
+
     } catch (error) {
-        logger.error('Failed to activate extension', error);
-        vscode.window.showErrorMessage(`Failed to activate LLM Code Patcher: ${error}`);
+        const message = error instanceof Error ? error.message : 'Unknown error';
+        vscode.window.showErrorMessage(`Failed to parse input: ${message}`);
     }
 }
 
-export function deactivate() {
-    logger?.info('Extension deactivating');
-    
-    // Clean up resources
-    webViewProvider?.dispose();
-    
-    logger?.info('Extension deactivated');
+async function previewChanges(state: DifferState) {
+    if (!state.parsedInput) {
+        vscode.window.showErrorMessage('No changes to preview. Parse input first.');
+        return;
+    }
+
+    if (!state.previewContent) {
+        state.previewContent = ChangeParser.generatePreview(state.parsedInput);
+    }
+
+    await showPreview(state.previewContent);
 }
 
-function initializeModules(context: vscode.ExtensionContext) {
-    logger.info('Initializing modules');
-    
-    // Initialize web view provider
-    webViewProvider = new DifferProvider(context.extensionUri, context);
-    
-    // TODO: Initialize other modules as we build them
-    // - inputProcessor = new InputProcessor();
-    // - codeAnalysisEngine = new CodeAnalysisEngine();
-    // - changeEngine = new ChangeEngine();
-    // - storageSystem = new StorageSystem(context);
-    
-    logger.info('Modules initialized');
-}
-
-function registerCommands(context: vscode.ExtensionContext) {
-    logger.info('Registering commands');
-    
-    // Main panel command
-    const openPanelCommand = vscode.commands.registerCommand('differ.openPanel', () => {
-        webViewProvider.show();
+async function showPreview(content: string) {
+    // Create and show a new untitled document with the preview
+    const doc = await vscode.workspace.openTextDocument({
+        content,
+        language: 'markdown'
     });
     
-    // Apply changes command (will be called from webview)
-    const applyChangesCommand = vscode.commands.registerCommand('differ.applyChanges', async (changes) => {
-        try {
-            logger.info('Apply changes command triggered', { changeCount: changes?.length });
-            // TODO: Implement change application logic
-            vscode.window.showInformationMessage(`Ready to apply ${changes?.length || 0} changes (not yet implemented)`);
-        } catch (error) {
-            logger.error('Failed to apply changes', error);
-            vscode.window.showErrorMessage(`Failed to apply changes: ${error}`);
+    await vscode.window.showTextDocument(doc, {
+        preview: true,
+        viewColumn: vscode.ViewColumn.Beside
+    });
+}
+
+async function applyChanges(state: DifferState) {
+    if (!state.parsedInput) {
+        vscode.window.showErrorMessage('No changes to apply. Parse input first.');
+        return;
+    }
+
+    const workspace = vscode.workspace.workspaceFolders?.[0];
+    if (!workspace) {
+        vscode.window.showErrorMessage('No workspace folder found');
+        return;
+    }
+
+    try {
+        // Now validate file access when actually needed
+        vscode.window.showInformationMessage('Validating file access...');
+        
+        const fileValidations = await Promise.all(
+            state.parsedInput.metadata!.affectedFiles.map(async (file) => ({
+                file,
+                validation: await ChangeParser.validateFileAccess(file, workspace)
+            }))
+        );
+
+        // Check for file access errors
+        const fileErrors = fileValidations
+            .filter(fv => !fv.validation.isValid)
+            .map(fv => `${fv.file}: ${fv.validation.errors.join(', ')}`);
+
+        if (fileErrors.length > 0) {
+            vscode.window.showErrorMessage(`File access errors: ${fileErrors.join('; ')}`);
+            return;
         }
-    });
-    
-    // Clear changes command
-    const clearChangesCommand = vscode.commands.registerCommand('differ.clearChanges', () => {
-        logger.info('Clear changes command triggered');
-        webViewProvider.clearChanges();
-        vscode.window.showInformationMessage('Pending changes cleared');
-    });
-    
-    // Show change history command
-    const showHistoryCommand = vscode.commands.registerCommand('differ.showHistory', () => {
-        logger.info('Show history command triggered');
-        // TODO: Implement history display
-        vscode.window.showInformationMessage('Change history (not yet implemented)');
-    });
-    
-    // Undo last changes command
-    const undoChangesCommand = vscode.commands.registerCommand('differ.undoLastChanges', () => {
-        logger.info('Undo changes command triggered');
-        // TODO: Implement undo functionality
-        vscode.window.showInformationMessage('Undo changes (not yet implemented)');
-    });
-    
-    // Add commands to disposal
-    context.subscriptions.push(
-        openPanelCommand,
-        applyChangesCommand,
-        clearChangesCommand,
-        showHistoryCommand,
-        undoChangesCommand
-    );
-    
-    logger.info('Commands registered');
-}
 
-function registerWebViewProvider(context: vscode.ExtensionContext) {
-    logger.info('Registering web view provider');
-    
-    // Register the web view provider in the activity bar
-    const provider = vscode.window.registerWebviewViewProvider(
-        'differ-panel',
-        webViewProvider,
-        {
-            webviewOptions: {
-                retainContextWhenHidden: true
+        // Show file warnings
+        const fileWarnings = fileValidations
+            .flatMap(fv => fv.validation.warnings.map(w => `${fv.file}: ${w}`));
+        
+        if (fileWarnings.length > 0) {
+            const proceed = await vscode.window.showWarningMessage(
+                `File warnings detected. Continue anyway?`,
+                { detail: fileWarnings.join('\n') },
+                'Yes', 'No'
+            );
+            
+            if (proceed !== 'Yes') {
+                return;
             }
         }
-    );
-    
-    context.subscriptions.push(provider);
-    
-    logger.info('Web view provider registered');
+
+        // Confirm before applying
+        const confirmResult = await vscode.window.showWarningMessage(
+            `Apply ${state.parsedInput.changes.length} changes to ${state.parsedInput.metadata!.affectedFiles.length} files?`,
+            { modal: true },
+            'Apply Changes', 'Cancel'
+        );
+
+        if (confirmResult !== 'Apply Changes') {
+            return;
+        }
+
+        // Apply changes
+        vscode.window.showInformationMessage('Applying changes...');
+        await applyParsedChanges(state.parsedInput, workspace);
+        
+        vscode.window.showInformationMessage('Changes applied successfully!');
+        
+    } catch (error) {
+        const message = error instanceof Error ? error.message : 'Unknown error';
+        vscode.window.showErrorMessage(`Failed to apply changes: ${message}`);
+    }
 }
 
-// Export for use in other modules
-export function getLogger(): Logger {
-    return logger;
+async function applyParsedChanges(input: ParsedInput, workspace: vscode.WorkspaceFolder) {
+    const groupedChanges = ChangeParser.groupChangesByFile(input);
+    
+    for (const [filePath, changes] of groupedChanges) {
+        await applyChangesToFile(filePath, changes, workspace);
+    }
 }
 
-export function getWebViewProvider(): DifferProvider {
-    return webViewProvider;
+async function applyChangesToFile(filePath: string, changes: any[], workspace: vscode.WorkspaceFolder) {
+    const fullPath = vscode.Uri.joinPath(workspace.uri, filePath);
+    
+    try {
+        // Try to read existing file
+        let content = '';
+        try {
+            const fileData = await vscode.workspace.fs.readFile(fullPath);
+            content = Buffer.from(fileData).toString('utf8');
+        } catch {
+            // File doesn't exist - will be created
+            console.log(`Creating new file: ${filePath}`);
+        }
+
+        // Apply each change to the content
+        let modifiedContent = content;
+        
+        for (const change of changes) {
+            modifiedContent = applyChange(modifiedContent, change);
+        }
+
+        // Write the modified content back
+        const writeData = Buffer.from(modifiedContent, 'utf8');
+        await vscode.workspace.fs.writeFile(fullPath, writeData);
+        
+        console.log(`Applied ${changes.length} changes to ${filePath}`);
+        
+    } catch (error) {
+        throw new Error(`Failed to apply changes to ${filePath}: ${error}`);
+    }
+}
+
+function applyChange(content: string, change: any): string {
+    // This is where you'd implement the actual change application logic
+    // For now, just a placeholder that shows the concept
+    
+    switch (change.action) {
+        case 'add_import':
+            return addImport(content, change.code);
+        
+        case 'replace_function':
+            return replaceFunction(content, change.target, change.code);
+            
+        case 'add_function':
+            return addFunction(content, change.code);
+            
+        // Add other action handlers...
+        
+        default:
+            console.warn(`Unsupported action: ${change.action}`);
+            return content;
+    }
+}
+
+// Placeholder change application functions
+function addImport(content: string, importCode: string): string {
+    const lines = content.split('\n');
+    const importIndex = lines.findIndex(line => line.startsWith('use ')) || 0;
+    lines.splice(importIndex, 0, importCode);
+    return lines.join('\n');
+}
+
+function replaceFunction(content: string, functionName: string, newCode: string): string {
+    // Simple regex-based replacement - you'd want more sophisticated parsing
+    const functionRegex = new RegExp(`pub fn ${functionName}\\([^}]*\\}`, 'gs');
+    return content.replace(functionRegex, newCode);
+}
+
+function addFunction(content: string, functionCode: string): string {
+    // Add function before the last closing brace
+    const lastBraceIndex = content.lastIndexOf('}');
+    if (lastBraceIndex === -1) {
+        return content + '\n\n' + functionCode;
+    }
+    
+    return content.slice(0, lastBraceIndex) + '\n\n' + functionCode + '\n' + content.slice(lastBraceIndex);
+}
+
+function clearChanges(state: DifferState) {
+    state.parsedInput = null;
+    state.lastValidationResult = null;
+    state.previewContent = null;
+    vscode.window.showInformationMessage('Changes cleared');
+}
+
+export function deactivate() {
+    console.log('👋 Differ extension deactivated');
 }
