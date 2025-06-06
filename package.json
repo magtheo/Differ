@@ -65,7 +65,12 @@
       "properties": {
         "differ.logLevel": {
           "type": "string",
-          "enum": ["debug", "info", "warn", "error"],
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ],
           "default": "info",
           "description": "Set the logging level for the extension"
         },
@@ -93,11 +98,14 @@
     "watch": "tsc -watch -p ./",
     "compile-webview": "npm run compile && npm run copy-webview",
     "copy-webview": "mkdir -p out/webview && cp -r src/webview/* out/webview/ 2>/dev/null || (mkdir -p out/webview && echo 'No webview files to copy')",
-    "clean": "rm -rf out/",
+    "clean": "rm -rf out/ node_modules/.cache",
     "rebuild": "npm run clean && npm run compile-webview",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src --ext .ts",
-    "test": "vscode-test"
+    "test": "vscode-test",
+    "package": "vsce package",
+    "publish": "vsce publish",
+    "install:clean": "rm -rf node_modules package-lock.json && npm install"
   },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
@@ -110,6 +118,10 @@
     "eslint": "^9.25.1",
     "typescript": "^5.8.3"
   },
-  "dependencies": {
+  "extensionDependencies": [],
+  "__metadata": {
+    "id": "differ",
+    "publisherId": "magtheo",
+    "publisherDisplayName": "magtheo"
   }
 }
