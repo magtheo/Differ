@@ -3,6 +3,37 @@
   "displayName": "Differ",
   "description": "Apply LLM-generated code changes safely with preview and rollback capabilities",
   "version": "0.0.1",
+  "publisher": "your-publisher-name",
+  "author": {
+    "name": "Your Name",
+    "email": "your.email@example.com"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/magtheo/differ.git"
+  },
+  "bugs": {
+    "url": "https://github.com/magtheo/differ/issues"
+  },
+  "homepage": "https://github.com/magtheo/differ#readme",
+  "keywords": [
+    "ai",
+    "llm",
+    "code-generation",
+    "diff",
+    "preview",
+    "chatgpt",
+    "claude",
+    "automation",
+    "refactoring",
+    "code-changes"
+  ],
+  "icon": "images/icon.png",
+  "galleryBanner": {
+    "color": "#1e1e1e",
+    "theme": "dark"
+  },
   "engines": {
     "vscode": "^1.100.0"
   },
@@ -65,12 +96,7 @@
       "properties": {
         "differ.logLevel": {
           "type": "string",
-          "enum": [
-            "debug",
-            "info",
-            "warn",
-            "error"
-          ],
+          "enum": ["debug", "info", "warn", "error"],
           "default": "info",
           "description": "Set the logging level for the extension"
         },
@@ -118,10 +144,12 @@
     "eslint": "^9.25.1",
     "typescript": "^5.8.3"
   },
+  "dependencies": {
+  },
   "extensionDependencies": [],
   "__metadata": {
     "id": "differ",
-    "publisherId": "magtheo",
-    "publisherDisplayName": "magtheo"
+    "publisherId": "your-publisher-id",
+    "publisherDisplayName": "Your Publisher Name"
   }
 }
