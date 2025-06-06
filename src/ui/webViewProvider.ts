@@ -1,6 +1,9 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { UIStateManager, PendingChange, ParsedInput } from './stateManager';
+import { ChangeParser, ValidationError, ValidationWarning } from '../parser/inputParser';
+import { ValidationEngine, ValidationSummary } from '../validation/validationEngine';
+import { ErrorReporter } from '../validation/errorReporter';
 import { Logger } from '../utils/logger';
 
 export class DifferProvider implements vscode.WebviewViewProvider {
@@ -18,11 +21,17 @@ export class DifferProvider implements vscode.WebviewViewProvider {
         this._stateManager = new UIStateManager();
         
         // Listen to state changes and update webview
-        this._stateManager.onStateChange((newState) => { // Capture new state for logging
-            this._logger.info('State changed, preparing to update webview.', { stateIsLoading: newState.isLoading, error: newState.error, pendingChangesCount: newState.pendingChanges.length });
+        this._stateManager.onStateChange((newState) => {
+            this._logger.info('State changed, preparing to update webview.', { 
+                stateIsLoading: newState.isLoading, 
+                validationInProgress: newState.validationInProgress,
+                globalErrors: newState.globalValidationErrors.length,
+                pendingChangesCount: newState.pendingChanges.length 
+            });
             this._updateWebview();
         });
-        this._logger.info('DifferProvider constructed. Initial state manager isLoading:', this._stateManager.getState().isLoading);
+        
+        this._logger.info('DifferProvider constructed. Initial state:', this._stateManager.getStateSnapshot());
     }
     
     public resolveWebviewView(
@@ -36,8 +45,8 @@ export class DifferProvider implements vscode.WebviewViewProvider {
         webviewView.webview.options = {
             enableScripts: true,
             localResourceRoots: [
-                this._extensionUri, // For content under extension's root
-                vscode.Uri.joinPath(this._extensionUri, 'out') // Specifically for 'out' directory if needed
+                this._extensionUri,
+                vscode.Uri.joinPath(this._extensionUri, 'out')
             ]
         };
         
@@ -51,9 +60,10 @@ export class DifferProvider implements vscode.WebviewViewProvider {
         );
         
         // Initialize with current state
-        // This is crucial: send the state AFTER the webview HTML is set and ready to receive messages.
-        this._logger.info('Webview HTML set. Sending initial state to webview.', { initialStateIsLoading: this._stateManager.getState().isLoading });
-        this._updateWebview(); 
+        this._logger.info('Webview HTML set. Sending initial state to webview.', { 
+            initialStateIsLoading: this._stateManager.getState().isLoading 
+        });
+        this._updateWebview();
         
         this._logger.info('WebView resolved and initialized');
     }
@@ -97,6 +107,10 @@ export class DifferProvider implements vscode.WebviewViewProvider {
                 this._handleToggleChangeSelection(message.data);
                 break;
                 
+            case 'selectOnlyValid':
+                this._handleSelectOnlyValid();
+                break;
+                
             case 'clearInput':
                 this._logger.info('Handling clearInput message.');
                 this._stateManager.clearInput();
@@ -107,6 +121,14 @@ export class DifferProvider implements vscode.WebviewViewProvider {
                 this._stateManager.clearPendingChanges();
                 break;
                 
+            case 'retryValidation':
+                await this._handleRetryValidation();
+                break;
+                
+            case 'validateTargets':
+                await this._handleValidateTargets();
+                break;
+                
             default:
                 this._logger.warn('Unknown message type received from webview', { type: message.type });
         }
@@ -115,152 +137,200 @@ export class DifferProvider implements vscode.WebviewViewProvider {
     private async _handleParseInput(inputData: { jsonInput: string }) {
         this._logger.info('Starting to parse input', { inputLength: inputData.jsonInput?.length });
         
-        this._stateManager.setLoading(true); // Set loading true at the beginning
-        this._stateManager.setError(null);   // Clear previous errors
-            
+        // Clear previous state and start loading
+        this._stateManager.setLoading(true);
+        this._stateManager.clearGlobalValidationErrors();
+        this._stateManager.clearAllValidationErrors();
+        this._stateManager.clearPendingChanges();
+        
         try {
             // Validate input is not empty
             if (!inputData.jsonInput || inputData.jsonInput.trim() === '') {
-                throw new Error('Input cannot be empty.');
+                this._stateManager.setGlobalValidationErrors([{
+                    type: 'json_parse',
+                    message: 'Input cannot be empty',
+                    suggestion: 'Please paste valid JSON containing a "changes" array'
+                }]);
+                return;
             }
             
-            // Parse JSON with better error handling
-            let parsedData: ParsedInput;
+            // Phase 1: JSON Structure Validation
+            this._logger.info('Phase 1: Validating JSON structure');
+            const structureValidation = ChangeParser.validateJsonStructure(inputData.jsonInput.trim());
+            
+            if (!structureValidation.isValid) {
+                this._logger.warn('JSON structure validation failed', { 
+                    errorCount: structureValidation.errors.length,
+                    warningCount: structureValidation.warnings.length 
+                });
+                
+                // Show structure validation errors in the UI
+                this._stateManager.setGlobalValidationErrors(
+                    structureValidation.errors, 
+                    structureValidation.warnings
+                );
+                return;
+            }
+            
+            // Phase 2: Parse the validated JSON
+            this._logger.info('Phase 2: Parsing validated JSON');
+            let parsedData: any;
             try {
-                const rawParsedData = JSON.parse(inputData.jsonInput.trim());
-                // Basic validation of ParsedInput structure
-                if (!rawParsedData || typeof rawParsedData !== 'object') {
-                    throw new Error('Input must be a valid JSON object.');
-                }
-                parsedData = rawParsedData as ParsedInput; // Cast after basic check
+                parsedData = ChangeParser.parseInput(inputData.jsonInput.trim());
             } catch (parseError) {
-                const message = parseError instanceof Error ? parseError.message : String(parseError);
-                throw new Error(`Invalid JSON format: ${message}`);
+                // This shouldn't happen if validation passed, but just in case
+                const errorMessage = parseError instanceof Error ? parseError.message : String(parseError);
+                this._stateManager.setGlobalValidationErrors([{
+                    type: 'json_parse',
+                    message: `Unexpected parsing error: ${errorMessage}`,
+                    suggestion: 'Please check your JSON format'
+                }]);
+                return;
             }
             
-            if (!parsedData.changes) {
-                throw new Error('Missing required "changes" property in JSON.');
+            // Phase 3: Semantic Validation
+            this._logger.info('Phase 3: Semantic validation');
+            const semanticValidation = ChangeParser.validateSemanticConsistency(parsedData);
+            
+            if (!semanticValidation.isValid) {
+                this._logger.warn('Semantic validation failed', { 
+                    errorCount: semanticValidation.errors.length 
+                });
+                
+                this._stateManager.setGlobalValidationErrors(
+                    [...structureValidation.errors, ...semanticValidation.errors],
+                    [...structureValidation.warnings, ...semanticValidation.warnings]
+                );
+                return;
             }
             
-            if (!Array.isArray(parsedData.changes)) {
-                throw new Error('"changes" property must be an array.');
-            }
+            // Phase 4: Create pending changes
+            this._logger.info('Phase 4: Creating pending changes');
+            const pendingChanges: PendingChange[] = parsedData.changes.map((change: any, index: number) => 
+                this._stateManager.createPendingChangeFromParsed(change, index)
+            );
             
-            if (parsedData.changes.length === 0) {
-                // Allow empty changes array as a valid parse, but maybe show a message
-                this._logger.info('Parsed input contains an empty "changes" array.');
-                // vscode.window.showInformationMessage("Parsed input, but no changes were found.");
-            }
-            
-            // Validate each change object (more thoroughly)
-            const pendingChanges: PendingChange[] = parsedData.changes.map((change: any, index: number): PendingChange => {
-                if (!change.file || typeof change.file !== 'string') {
-                    throw new Error(`Change ${index + 1}: Missing or invalid "file" property (must be a string).`);
-                }
-                if (!change.action || typeof change.action !== 'string') {
-                    throw new Error(`Change ${index + 1}: Missing or invalid "action" property (must be a string).`);
-                }
-                if (change.target === undefined || change.target === null || typeof change.target !== 'string') { // Allow empty string for target
-                    throw new Error(`Change ${index + 1}: Missing or invalid "target" property (must be a string).`);
-                }
-                if (change.code === undefined || change.code === null || typeof change.code !== 'string') { // Allow empty string for code
-                    throw new Error(`Change ${index + 1}: Missing or invalid "code" property (must be a string).`);
-                }
-                if (change.class !== undefined && typeof change.class !== 'string') {
-                    throw new Error(`Change ${index + 1}: Invalid "class" property (must be a string if present).`);
-                }
-
-                return {
-                    id: `change-${Date.now()}-${index}-${Math.random().toString(36).substring(2, 7)}`, // Even more unique IDs
-                    file: change.file,
-                    action: change.action,
-                    target: change.target,
-                    code: change.code,
-                    class: change.class,
-                    selected: true, // Default to selected
-                    status: 'pending' as const,
-                };
-            });
-            
-            // Set parsed input and pending changes
-            this._stateManager.setParsedInput(parsedData); // Store the original parsed structure
+            // Store results
+            this._stateManager.setParsedInput(parsedData);
             this._stateManager.setPendingChanges(pendingChanges);
+            
+            // Store any warnings from validation
+            if (structureValidation.warnings.length > 0 || semanticValidation.warnings.length > 0) {
+                this._stateManager.setGlobalValidationErrors(
+                    [], // No errors if we got this far
+                    [...structureValidation.warnings, ...semanticValidation.warnings]
+                );
+            }
+            
+            // Phase 5: Target Existence Validation (automatic)
+            this._logger.info('Phase 5: Starting target existence validation');
+            // Don't await this - let it run in background and update UI when complete
+            this._performTargetValidation(parsedData);
             
             this._logger.info('Successfully parsed input.', { 
                 changeCount: pendingChanges.length,
-                description: parsedData.description 
+                description: parsedData.description,
+                warningCount: structureValidation.warnings.length + semanticValidation.warnings.length
             });
             
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : `Unknown error: ${String(error)}`;
             this._logger.error('Failed to parse input', { error: errorMessage, originalError: error });
-            this._stateManager.setError(errorMessage);
-            // Clear any potentially partially processed data if parsing fails
-            this._stateManager.setParsedInput(null);
-            this._stateManager.setPendingChanges([]);
+            
+            this._stateManager.setGlobalValidationErrors([{
+                type: 'json_parse',
+                message: `Parsing failed: ${errorMessage}`,
+                suggestion: 'Check your JSON format and try again'
+            }]);
+            
         } finally {
-            this._stateManager.setLoading(false); // Set loading false at the end
+            this._stateManager.setLoading(false);
         }
     }
     
     private async _handleApplyChanges(data: { selectedChanges: string[] }) {
         this._logger.info('Handling applyChanges message', { selectedChangeIds: data.selectedChanges });
         this._stateManager.setLoading(true);
-        this._stateManager.setError(null);
-
+        
         const changesToApply = this._stateManager.getSelectedChanges().filter(c => data.selectedChanges.includes(c.id));
         
         try {
             if (changesToApply.length === 0) {
-                vscode.window.showWarningMessage("No changes selected to apply.");
                 this._logger.warn("Apply changes requested, but no changes were actually selected or found in state.");
-                return; // Exit early
+                return;
             }
-
-            // TODO: Replace with actual change application when built
-            this._logger.info(`Executing 'differ.applyChanges' command with ${changesToApply.length} changes.`);
-            await vscode.commands.executeCommand('differ.applyChanges', changesToApply); // Pass the actual change objects
             
-            // Assuming command handles individual statuses or throws an error for batch failure
-            // For now, if command doesn't throw, assume all selected were "applied"
-            // A more robust system would get feedback per change.
+            // Check if any selected changes have validation errors
+            const invalidChanges = changesToApply.filter(change => !change.isValid);
+            if (invalidChanges.length > 0) {
+                this._logger.warn('Attempted to apply invalid changes', { 
+                    invalidCount: invalidChanges.length,
+                    totalCount: changesToApply.length 
+                });
+                
+                this._stateManager.setGlobalValidationErrors([{
+                    type: 'invalid_type',
+                    message: `Cannot apply ${invalidChanges.length} invalid changes. Fix validation errors first.`,
+                    suggestion: 'Use "Select Only Valid" to select only changes without errors'
+                }]);
+                return;
+            }
+            
+            this._logger.info(`Executing 'differ.applyChanges' command with ${changesToApply.length} changes.`);
+            await vscode.commands.executeCommand('differ.applyChanges', changesToApply);
+            
+            // Mark applied changes as successful
             changesToApply.forEach(change => {
                 this._stateManager.updatePendingChangeStatus(change.id, 'applied');
             });
-            vscode.window.showInformationMessage(`Successfully applied ${changesToApply.length} changes (simulated).`);
-            this._logger.info(`Simulated application of ${changesToApply.length} changes.`);
+            
+            this._logger.info(`Successfully applied ${changesToApply.length} changes.`);
 
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
             this._logger.error('Failed to apply changes via command', { error: errorMessage, originalError: error });
-            this._stateManager.setError(`Apply error: ${errorMessage}`);
-            // Optionally mark selected changes as 'failed'
+            
+            this._stateManager.setGlobalValidationErrors([{
+                type: 'json_parse', // Using existing type
+                message: `Apply failed: ${errorMessage}`,
+                suggestion: 'Check the VS Code output panel for more details'
+            }]);
+            
+            // Mark selected changes as failed
             changesToApply.forEach(change => {
                 this._stateManager.updatePendingChangeStatus(change.id, 'failed', errorMessage);
             });
+            
         } finally {
             this._stateManager.setLoading(false);
         }
     }
     
     private async _handlePreviewChange(data: { changeId: string }) {
-        this._logger.info('Handling previewChange message (Entered _handlePreviewChange)', { changeId: data.changeId });
+        this._logger.info('Handling previewChange message', { changeId: data.changeId });
         const change = this._stateManager.getState().pendingChanges.find(c => c.id === data.changeId);
 
         if (!change) {
             this._logger.warn('Preview requested for non-existent change ID', { changeId: data.changeId });
-            vscode.window.showErrorMessage(`Cannot preview change: ID ${data.changeId} not found.`);
+            this._stateManager.setGlobalValidationErrors([{
+                type: 'json_parse',
+                message: `Cannot preview change: ID ${data.changeId} not found`,
+                suggestion: 'Try refreshing the changes list'
+            }]);
             return;
         }
 
         try {
             const workspaceFolders = vscode.workspace.workspaceFolders;
             if (!workspaceFolders || workspaceFolders.length === 0) {
-                vscode.window.showErrorMessage("No workspace folder open to preview changes.");
-                this._logger.warn("Preview failed: No workspace folder open.");
+                this._stateManager.setGlobalValidationErrors([{
+                    type: 'json_parse',
+                    message: 'No workspace folder open to preview changes',
+                    suggestion: 'Open a workspace folder first'
+                }]);
                 return;
             }
-            // Use the first workspace folder as the root for relative file paths
+            
             const workspaceRoot = workspaceFolders[0].uri;
             const originalFileUri = vscode.Uri.joinPath(workspaceRoot, change.file);
 
@@ -274,12 +344,18 @@ export class DifferProvider implements vscode.WebviewViewProvider {
                 originalDocument = await vscode.workspace.openTextDocument(originalFileUri);
             } catch (e: any) {
                 this._logger.error(`Failed to open original file for preview: ${originalFileUri.fsPath}`, e);
-                vscode.window.showErrorMessage(`File not found or could not be opened: ${change.file}. Cannot generate preview. Error: ${e.message}`);
+                
+                this._stateManager.setChangeValidationErrors(change.id, [{
+                    type: 'json_parse',
+                    message: `File not found: ${change.file}`,
+                    suggestion: 'Check that the file path is correct',
+                    details: e.message
+                }]);
                 return;
             }
+            
             const originalContent = originalDocument.getText();
-            let modifiedContent = originalContent; // Start with original content
-
+            let modifiedContent = originalContent;
             let unableToPreviewReason: string | null = null;
             const EOL = originalDocument.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n';
 
@@ -288,7 +364,6 @@ export class DifferProvider implements vscode.WebviewViewProvider {
                 if (change.target && change.target.length > 0) {
                     const targetIndex = originalContent.indexOf(change.target);
                     if (targetIndex !== -1) {
-                        // Simple string replacement. This assumes change.target is the exact string of the old code.
                         modifiedContent = originalContent.substring(0, targetIndex) +
                                           change.code +
                                           originalContent.substring(targetIndex + change.target.length);
@@ -303,25 +378,21 @@ export class DifferProvider implements vscode.WebviewViewProvider {
             } else if (change.action.toLowerCase().includes('add') || change.action.toLowerCase().includes('insert')) {
                 if (change.target && change.target.toLowerCase().startsWith('line:')) {
                     const lineNumberStr = change.target.substring('line:'.length);
-                    const lineNumber = parseInt(lineNumberStr, 10); // 1-indexed
+                    const lineNumber = parseInt(lineNumberStr, 10);
 
                     if (!isNaN(lineNumber) && lineNumber >= 1) {
                         const lines = originalContent.split(EOL);
-                        // Convert 1-indexed lineNumber to 0-indexed spliceIndex
-                        // Allow inserting at lines.length (which means after the last line)
                         const spliceIndex = Math.max(0, Math.min(lineNumber - 1, lines.length));
-
                         lines.splice(spliceIndex, 0, change.code);
                         modifiedContent = lines.join(EOL);
                     } else {
                         unableToPreviewReason = `Invalid line number in target: '${change.target}'. Appending proposed code instead.`;
                         modifiedContent = originalContent + (originalContent.length > 0 ? EOL : '') + `// --- Proposed Code (appended due to invalid line target for '${change.action}') ---${EOL}${change.code}`;
                     }
-                } else { // Default 'add' behavior: append to end of file
+                } else {
                     modifiedContent = originalContent + (originalContent.length > 0 ? EOL : '') + change.code;
                 }
             } else {
-                // Fallback for actions not explicitly handled for precise modification
                 unableToPreviewReason = `Action '${change.action}' is not fully supported for precise diff preview. Showing proposed code appended.`;
                 modifiedContent = originalContent + (originalContent.length > 0 ? EOL : '') +
                                   `// --- Proposed Code for action '${change.action}' (appended due to limited preview support) ---${EOL}` +
@@ -331,28 +402,32 @@ export class DifferProvider implements vscode.WebviewViewProvider {
 
             if (unableToPreviewReason) {
                 this._logger.warn(`Preview limitation for change ${change.id}: ${unableToPreviewReason}`, { change });
-                vscode.window.showWarningMessage(`Preview for ${change.file}: ${unableToPreviewReason} The diff view may show explanatory comments.`);
+                
+                this._stateManager.setChangeValidationErrors(change.id, [], [{
+                    type: 'missing_description',
+                    message: `Preview limitation: ${unableToPreviewReason}`,
+                    suggestion: 'The diff view shows approximated changes'
+                }]);
             }
 
             const diffTitle = `Preview: ${path.basename(change.file)} (${change.action})`;
-
-            // Create an in-memory document for the modified content.
-            // VS Code will handle its lifecycle for the diff view.
             const modifiedDoc = await vscode.workspace.openTextDocument({
                 content: modifiedContent,
-                language: originalDocument.languageId // Use language of original file for syntax highlighting
+                language: originalDocument.languageId
             });
 
-            // Show the diff
             await vscode.commands.executeCommand('vscode.diff', originalDocument.uri, modifiedDoc.uri, diffTitle);
             this._logger.info(`Showing diff for ${change.id}: ${originalDocument.uri.fsPath} vs. untitled (preview)`);
 
         } catch (error: any) {
             const errorMessage = error instanceof Error ? error.message : String(error);
-            this._logger.error('Failed to generate preview (outer catch)', { error: errorMessage, originalError: error, changeId: data.changeId });
-            // You might want to update the state manager's error here if you have a way to display it for this specific change
-            // this._stateManager.updatePendingChangeStatus(data.changeId, 'error', `Preview failed: ${errorMessage}`);
-            vscode.window.showErrorMessage(`Failed to generate preview for change ${data.changeId}: ${errorMessage}`);
+            this._logger.error('Failed to generate preview', { error: errorMessage, originalError: error, changeId: data.changeId });
+            
+            this._stateManager.setChangeValidationErrors(data.changeId, [{
+                type: 'json_parse',
+                message: `Preview failed: ${errorMessage}`,
+                suggestion: 'Check the file path and try again'
+            }]);
         }
     }
     
@@ -361,22 +436,138 @@ export class DifferProvider implements vscode.WebviewViewProvider {
         this._stateManager.toggleChangeSelection(data.changeId, data.selected);
     }
     
+    private _handleSelectOnlyValid() {
+        this._logger.info('Handling selectOnlyValid message');
+        this._stateManager.selectOnlyValidChanges();
+    }
+    
+    private async _handleRetryValidation() {
+        this._logger.info('Handling retryValidation message');
+        const currentInput = this._stateManager.getState().jsonInput;
+        
+        if (!currentInput) {
+            this._stateManager.setGlobalValidationErrors([{
+                type: 'json_parse',
+                message: 'No input to validate',
+                suggestion: 'Enter JSON input first'
+            }]);
+            return;
+        }
+        
+        // Re-run the parsing with current input
+        await this._handleParseInput({ jsonInput: currentInput });
+    }
+
+    /**
+     * Perform target existence validation in background
+     */
+    private async _performTargetValidation(parsedInput: ParsedInput) {
+        const workspace = vscode.workspace.workspaceFolders?.[0];
+        if (!workspace) {
+            this._logger.warn('No workspace folder available for target validation');
+            return;
+        }
+
+        try {
+            this._stateManager.setValidationInProgress(true);
+            this._logger.info('Starting target existence validation');
+
+            // Run full validation with target existence checking
+            const validationSummary = await ValidationEngine.validateChanges(parsedInput, workspace, {
+                validateTargetExistence: true,
+                parallelValidation: true,
+                timeoutMs: 30000
+            });
+
+            this._logger.info('Target validation completed', {
+                overallValid: validationSummary.overallValid,
+                invalidChanges: validationSummary.summary.invalidChanges,
+                processingTime: validationSummary.summary.processingTimeMs
+            });
+
+            // Update each change with its validation results
+            for (const changeValidation of validationSummary.changeValidations) {
+                const changeId = this._stateManager.getState().pendingChanges[changeValidation.changeIndex]?.id;
+                if (changeId) {
+                    this._stateManager.setChangeValidationErrors(
+                        changeId, 
+                        changeValidation.errors, 
+                        changeValidation.warnings
+                    );
+                }
+            }
+
+            // Update global validation state with any new global errors
+            if (validationSummary.suggestions.length > 0) {
+                const currentState = this._stateManager.getState();
+                const newWarnings: ValidationWarning[] = validationSummary.suggestions.map((suggestion: string) => ({
+                    type: 'missing_description',
+                    message: suggestion,
+                    suggestion: 'Review and address this issue'
+                }));
+                
+                this._stateManager.setGlobalValidationErrors(
+                    currentState.globalValidationErrors,
+                    [...currentState.globalValidationWarnings, ...newWarnings]
+                );
+            }
+
+        } catch (error) {
+            this._logger.error('Target validation failed', { error });
+            this._stateManager.setGlobalValidationErrors([{
+                type: 'json_parse',
+                message: `Target validation failed: ${error}`,
+                suggestion: 'Try validating individual changes or check workspace configuration'
+            }]);
+        } finally {
+            this._stateManager.setValidationInProgress(false);
+        }
+    }
+
+    /**
+     * Handle manual target validation trigger
+     */
+    private async _handleValidateTargets() {
+        this._logger.info('Handling manual target validation request');
+        
+        const parsedInput = this._stateManager.getState().parsedInput;
+        if (!parsedInput) {
+            this._stateManager.setGlobalValidationErrors([{
+                type: 'json_parse',
+                message: 'No parsed input available for target validation',
+                suggestion: 'Parse JSON input first'
+            }]);
+            return;
+        }
+
+        await this._performTargetValidation(parsedInput);
+    }
+    
     private _updateWebview() {
-        if (this._view && this._view.visible) { // Only post if view exists and is visible
+        if (this._view && this._view.visible) {
             const state = this._stateManager.getState();
-            this._logger.info('Posting stateUpdate to webview.', { stateIsLoading: state.isLoading, error: state.error, pendingChangesCount: state.pendingChanges.length });
+            this._logger.info('Posting stateUpdate to webview.', { 
+                stateIsLoading: state.isLoading,
+                validationInProgress: state.validationInProgress,
+                globalErrors: state.globalValidationErrors.length,
+                pendingChangesCount: state.pendingChanges.length 
+            });
+            
             this._view.webview.postMessage({
                 type: 'stateUpdate',
                 state: state
             });
         } else {
-            this._logger.info('Webview not visible or available, skipping state update.', { viewExists: !!this._view, viewVisible: this._view?.visible });
+            this._logger.info('Webview not visible or available, skipping state update.', { 
+                viewExists: !!this._view, 
+                viewVisible: this._view?.visible 
+            });
         }
     }
     
     private _getHtmlForWebview(webview: vscode.Webview): string {
         this._logger.debug('Generating HTML for webview.');
-        // Get URIs for local resources
+        
         const scriptUri = webview.asWebviewUri(
             vscode.Uri.joinPath(this._extensionUri, 'out', 'webview', 'main.js')
         );
@@ -384,14 +575,17 @@ export class DifferProvider implements vscode.WebviewViewProvider {
             vscode.Uri.joinPath(this._extensionUri, 'out', 'webview', 'main.css')
         );
         
-        // Generate nonce for security
         const nonce = this._getNonce();
         
-        this._logger.debug('Webview URIs', { scriptUri: scriptUri.toString(), styleUri: styleUri.toString() });
+        this._logger.debug('Webview URIs', { 
+            scriptUri: scriptUri.toString(), 
+            styleUri: styleUri.toString() 
+        });
 
         return `<!DOCTYPE html>
         <html lang="en">
         <head>
+            <meta charset="UTF-8">
             <meta http-equiv="Content-Security-Policy" content="
                 default-src 'none';
                 style-src ${webview.cspSource} 'unsafe-inline'; 
@@ -427,6 +621,22 @@ export class DifferProvider implements vscode.WebviewViewProvider {
                         <div class="spinner" role="status" aria-label="Loading"></div>
                         <span>Processing...</span>
                     </div>
+                    
+                    <!-- Global Validation Errors -->
+                    <div id="globalErrors" class="validation-errors hidden">
+                        <h4>Validation Errors</h4>
+                        <div id="globalErrorsList" class="error-list"></div>
+                        <div class="error-actions">
+                            <button id="retryValidationBtn" class="secondary">Retry Validation</button>
+                        </div>
+                    </div>
+                    
+                    <!-- Global Validation Warnings -->
+                    <div id="globalWarnings" class="validation-warnings hidden">
+                        <h4>Validation Warnings</h4>
+                        <div id="globalWarningsList" class="warning-list"></div>
+                    </div>
+                    
                     <div id="errorMessage" class="error hidden" role="alert"></div>
                     <div id="successMessage" class="success hidden" role="status"></div>
                 </div>
@@ -438,9 +648,12 @@ export class DifferProvider implements vscode.WebviewViewProvider {
                         <div class="changes-info">
                             <span id="changesCount">0 changes</span>
                             <span id="selectedCount">0 selected</span>
+                            <span id="validationSummary" class="validation-summary"></span>
                         </div>
                         <div class="changes-buttons">
                             <button id="applySelectedBtn" class="primary" disabled>Apply Selected</button>
+                            <button id="selectOnlyValidBtn" class="secondary" disabled>Select Only Valid</button>
+                            <button id="validateTargetsBtn" class="secondary" disabled>Validate Targets</button>
                             <button id="clearChangesBtn" class="secondary">Clear All Changes</button>
                         </div>
                     </div>

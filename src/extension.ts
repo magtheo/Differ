@@ -61,8 +61,8 @@ async function parseUserInput(state: DifferState) {
         
         const parsedInput = ChangeParser.parseInput(jsonInput);
         
-        // Validate structure only
-        const structureValidation = ChangeParser.validateStructure(parsedInput);
+        // Validate structure only - FIXED: using correct method name
+        const structureValidation = ChangeParser.validateJsonStructure(jsonInput);
         
         if (!structureValidation.isValid) {
             vscode.window.showErrorMessage(`Input validation failed: ${structureValidation.errors.join(', ')}`);

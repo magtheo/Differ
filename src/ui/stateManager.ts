@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { ValidationError, ValidationWarning } from '../parser/inputParser';
 
 export interface PendingChange {
     id: string;
@@ -8,8 +9,11 @@ export interface PendingChange {
     code: string;
     class?: string;
     selected: boolean;
-    status: 'pending' | 'applied' | 'failed' | 'error';
-    error?: string;
+    status: 'pending' | 'applied' | 'failed' | 'error' | 'validation_error';
+    error?: string; // Legacy error field for backwards compatibility
+    validationErrors: ValidationError[];  // NEW: Per-change validation errors
+    validationWarnings: ValidationWarning[]; // NEW: Per-change validation warnings
+    isValid: boolean;  // NEW: Quick validation check
 }
 
 export interface ParsedInput {
@@ -28,7 +32,12 @@ export interface UIState {
     
     // UI state
     isLoading: boolean;
-    error: string | null;
+    error: string | null; // Legacy global error
+    
+    // NEW: Enhanced validation state
+    validationInProgress: boolean;  // Track validation state separately from loading
+    globalValidationErrors: ValidationError[];  // JSON-level validation errors
+    globalValidationWarnings: ValidationWarning[]; // JSON-level validation warnings
     
     // History state (placeholder for now)
     changeHistory: any[];
@@ -40,8 +49,11 @@ export class UIStateManager {
         parsedInput: null,
         pendingChanges: [],
         selectedChanges: [],
-        isLoading: false, // Initialize as false, not true
+        isLoading: false,
         error: null,
+        validationInProgress: false,
+        globalValidationErrors: [],
+        globalValidationWarnings: [],
         changeHistory: []
     };
     
@@ -49,8 +61,9 @@ export class UIStateManager {
     public readonly onStateChange = this._onStateChangeEmitter.event;
     
     constructor() {
-        // Initialize state - make sure loading is false initially
+        // Initialize state
         this._state.isLoading = false;
+        this._state.validationInProgress = false;
     }
     
     public dispose() {
@@ -68,7 +81,13 @@ export class UIStateManager {
     
     // Input management
     public setJsonInput(input: string) {
-        this._updateState({ jsonInput: input });
+        this._updateState({ 
+            jsonInput: input,
+            // Clear previous validation errors when input changes
+            globalValidationErrors: [],
+            globalValidationWarnings: [],
+            error: null
+        });
     }
     
     public setParsedInput(parsed: ParsedInput | null) {
@@ -79,8 +98,51 @@ export class UIStateManager {
         this._updateState({ 
             jsonInput: '',
             parsedInput: null,
+            error: null,
+            globalValidationErrors: [],
+            globalValidationWarnings: []
+        });
+    }
+    
+    // NEW: Global validation error management
+    public setGlobalValidationErrors(errors: ValidationError[], warnings: ValidationWarning[] = []) {
+        this._updateState({ 
+            globalValidationErrors: errors,
+            globalValidationWarnings: warnings,
+            // Clear legacy error when setting validation errors
             error: null
         });
+    }
+    
+    public clearGlobalValidationErrors() {
+        this._updateState({ 
+            globalValidationErrors: [],
+            globalValidationWarnings: []
+        });
+    }
+    
+    public hasGlobalValidationErrors(): boolean {
+        return this._state.globalValidationErrors.length > 0;
+    }
+    
+    public getGlobalValidationSummary(): string {
+        const errorCount = this._state.globalValidationErrors.length;
+        const warningCount = this._state.globalValidationWarnings.length;
+        
+        if (errorCount === 0 && warningCount === 0) {
+            return '';
+        }
+        
+        let summary = '';
+        if (errorCount > 0) {
+            summary += `${errorCount} error${errorCount > 1 ? 's' : ''}`;
+        }
+        if (warningCount > 0) {
+            if (summary) summary += ', ';
+            summary += `${warningCount} warning${warningCount > 1 ? 's' : ''}`;
+        }
+        
+        return summary;
     }
     
     // Changes management
@@ -125,6 +187,43 @@ export class UIStateManager {
         );
         
         this._updateState({ pendingChanges: newChanges });
+    }
+    
+    // NEW: Validation-specific change updates
+    public setChangeValidationErrors(changeId: string, errors: ValidationError[], warnings: ValidationWarning[] = []) {
+        const newChanges = this._state.pendingChanges.map(change => 
+            change.id === changeId 
+                ? { 
+                    ...change, 
+                    validationErrors: errors,
+                    validationWarnings: warnings,
+                    isValid: errors.length === 0,
+                    status: errors.length > 0 ? 'validation_error' as const : 'pending' as const
+                }
+                : change
+        );
+        
+        this._updateState({ pendingChanges: newChanges });
+    }
+    
+    public clearChangeValidationErrors(changeId: string) {
+        this.setChangeValidationErrors(changeId, [], []);
+    }
+    
+    public clearAllValidationErrors() {
+        const newChanges = this._state.pendingChanges.map(change => ({
+            ...change,
+            validationErrors: [],
+            validationWarnings: [],
+            isValid: true,
+            status: change.status === 'validation_error' ? 'pending' as const : change.status
+        }));
+        
+        this._updateState({ 
+            pendingChanges: newChanges,
+            globalValidationErrors: [],
+            globalValidationWarnings: []
+        });
     }
     
     public clearPendingChanges() {
@@ -183,9 +282,31 @@ export class UIStateManager {
         });
     }
     
+    // NEW: Select only valid changes
+    public selectOnlyValidChanges() {
+        const newChanges = this._state.pendingChanges.map(change => ({
+            ...change,
+            selected: change.isValid
+        }));
+        
+        const selectedChanges = newChanges
+            .filter(change => change.selected)
+            .map(change => change.id);
+        
+        this._updateState({ 
+            pendingChanges: newChanges,
+            selectedChanges
+        });
+    }
+    
     // UI state management
     public setLoading(loading: boolean) {
         this._updateState({ isLoading: loading });
+    }
+    
+    // NEW: Validation progress tracking
+    public setValidationInProgress(inProgress: boolean) {
+        this._updateState({ validationInProgress: inProgress });
     }
     
     public setError(error: string | null) {
@@ -227,12 +348,120 @@ export class UIStateManager {
     
     public hasErrors(): boolean {
         return this._state.error !== null || 
-               this._state.pendingChanges.some(change => change.status === 'error' || change.status === 'failed');
+               this._state.globalValidationErrors.length > 0 ||
+               this._state.pendingChanges.some(change => 
+                   change.status === 'error' || 
+                   change.status === 'failed' || 
+                   change.status === 'validation_error'
+               );
     }
     
     public getErrorChanges(): PendingChange[] {
         return this._state.pendingChanges.filter(change => 
-            change.status === 'error' || change.status === 'failed'
+            change.status === 'error' || 
+            change.status === 'failed' || 
+            change.status === 'validation_error'
         );
+    }
+    
+    // NEW: Validation-specific computed properties
+    public hasValidationErrors(): boolean {
+        return this._state.globalValidationErrors.length > 0 ||
+               this._state.pendingChanges.some(change => change.validationErrors.length > 0);
+    }
+    
+    public getValidChanges(): PendingChange[] {
+        return this._state.pendingChanges.filter(change => change.isValid);
+    }
+    
+    public getInvalidChanges(): PendingChange[] {
+        return this._state.pendingChanges.filter(change => !change.isValid);
+    }
+    
+    public getValidChangesCount(): number {
+        return this.getValidChanges().length;
+    }
+    
+    public getInvalidChangesCount(): number {
+        return this.getInvalidChanges().length;
+    }
+    
+    public hasOnlyValidChangesSelected(): boolean {
+        const selectedChanges = this.getSelectedChanges();
+        return selectedChanges.length > 0 && selectedChanges.every(change => change.isValid);
+    }
+    
+    public hasAnyInvalidChangesSelected(): boolean {
+        const selectedChanges = this.getSelectedChanges();
+        return selectedChanges.some(change => !change.isValid);
+    }
+    
+    public getValidationSummary(): string {
+        const totalChanges = this._state.pendingChanges.length;
+        const validChanges = this.getValidChangesCount();
+        const invalidChanges = this.getInvalidChangesCount();
+        const globalErrors = this._state.globalValidationErrors.length;
+        const globalWarnings = this._state.globalValidationWarnings.length;
+        
+        if (totalChanges === 0) {
+            return 'No changes to validate';
+        }
+        
+        let summary = `${validChanges}/${totalChanges} changes valid`;
+        
+        if (invalidChanges > 0) {
+            summary += `, ${invalidChanges} invalid`;
+        }
+        
+        if (globalErrors > 0 || globalWarnings > 0) {
+            summary += ` (${globalErrors} global errors, ${globalWarnings} warnings)`;
+        }
+        
+        return summary;
+    }
+    
+    // NEW: Bulk operations for validation
+    public markAllChangesAsValid() {
+        const newChanges = this._state.pendingChanges.map(change => ({
+            ...change,
+            validationErrors: [],
+            validationWarnings: [],
+            isValid: true,
+            status: change.status === 'validation_error' ? 'pending' as const : change.status
+        }));
+        
+        this._updateState({ pendingChanges: newChanges });
+    }
+    
+    public createPendingChangeFromParsed(parsedChange: any, index: number): PendingChange {
+        return {
+            id: `change-${Date.now()}-${index}-${Math.random().toString(36).substring(2, 7)}`,
+            file: parsedChange.file,
+            action: parsedChange.action,
+            target: parsedChange.target,
+            code: parsedChange.code,
+            class: parsedChange.class,
+            selected: true, // Default to selected
+            status: 'pending',
+            validationErrors: [],
+            validationWarnings: [],
+            isValid: true // Assume valid until validation runs
+        };
+    }
+    
+    // Debug helpers
+    public getStateSnapshot(): string {
+        return JSON.stringify({
+            inputLength: this._state.jsonInput.length,
+            hasParsedInput: !!this._state.parsedInput,
+            pendingChangesCount: this._state.pendingChanges.length,
+            selectedChangesCount: this._state.selectedChanges.length,
+            isLoading: this._state.isLoading,
+            validationInProgress: this._state.validationInProgress,
+            globalErrorsCount: this._state.globalValidationErrors.length,
+            globalWarningsCount: this._state.globalValidationWarnings.length,
+            validChangesCount: this.getValidChangesCount(),
+            invalidChangesCount: this.getInvalidChangesCount()
+        }, null, 2);
     }
 }
