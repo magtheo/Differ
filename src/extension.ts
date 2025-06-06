@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { ChangeParser, ParsedInput, ValidationResult } from './parser/inputParser';
+import { DifferProvider } from './ui/webViewProvider';
 
 interface DifferState {
     parsedInput: ParsedInput | null;
@@ -17,13 +18,22 @@ export function activate(context: vscode.ExtensionContext) {
         previewContent: null
     };
 
+    // Create and register the webview provider
+    const provider = new DifferProvider(context.extensionUri, context);
+    context.subscriptions.push(
+        vscode.window.registerWebviewViewProvider(DifferProvider.viewType, provider)
+    );
+
     // Register commands
     const commands = [
-        vscode.commands.registerCommand('differ.openPanel', () => openDifferPanel()),
+        vscode.commands.registerCommand('differ.openPanel', () => provider.show()),
         vscode.commands.registerCommand('differ.parseInput', () => parseUserInput(state)),
         vscode.commands.registerCommand('differ.previewChanges', () => previewChanges(state)),
         vscode.commands.registerCommand('differ.applyChanges', () => applyChanges(state)),
-        vscode.commands.registerCommand('differ.clearChanges', () => clearChanges(state))
+        vscode.commands.registerCommand('differ.clearChanges', () => {
+            clearChanges(state);
+            provider.clearChanges(); // Also clear the webview state
+        })
     ];
 
     context.subscriptions.push(...commands);
