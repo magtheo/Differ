@@ -1,3 +1,16 @@
+
+console.log('=== WEBVIEW MAIN.JS STARTING ===');
+console.log('Document ready state:', document.readyState);
+console.log('VS Code API available:', typeof acquireVsCodeApi);
+
+// Test if VS Code API works
+try {
+    const vscode = acquireVsCodeApi();
+    console.log('VS Code API acquired successfully');
+} catch (error) {
+    console.error('Failed to acquire VS Code API:', error);
+}
+
 // Get VS Code API
 const vscode = acquireVsCodeApi();
 
