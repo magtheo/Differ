@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { UIStateManager, PendingChange, ParsedInput } from './stateManager';
-import { ChangeParser, ValidationError, ValidationWarning } from '../parser/inputParser';
+import { UIStateManager, PendingChange } from './stateManager';
+import { ChangeParser, ParsedInput, ParsedChange, ValidationError, ValidationWarning } from '../parser/inputParser';
 import { ValidationEngine, ValidationSummary } from '../validation/validationEngine';
 import { ErrorReporter } from '../validation/errorReporter';
 import { Logger } from '../utils/logger';
@@ -137,6 +137,9 @@ export class DifferProvider implements vscode.WebviewViewProvider {
     private async _handleParseInput(inputData: { jsonInput: string }) {
         this._logger.info('Starting to parse input', { inputLength: inputData.jsonInput?.length });
         
+        // Add this line to prevent input from being cleared
+        this._stateManager.setJsonInput(inputData.jsonInput);
+
         // Clear previous state and start loading
         this._stateManager.setLoading(true);
         this._stateManager.clearGlobalValidationErrors();
@@ -174,7 +177,7 @@ export class DifferProvider implements vscode.WebviewViewProvider {
             
             // Phase 2: Parse the validated JSON
             this._logger.info('Phase 2: Parsing validated JSON');
-            let parsedData: any;
+            let parsedData: ParsedInput;
             try {
                 parsedData = ChangeParser.parseInput(inputData.jsonInput.trim());
             } catch (parseError) {
@@ -206,7 +209,7 @@ export class DifferProvider implements vscode.WebviewViewProvider {
             
             // Phase 4: Create pending changes
             this._logger.info('Phase 4: Creating pending changes');
-            const pendingChanges: PendingChange[] = parsedData.changes.map((change: any, index: number) => 
+            const pendingChanges: PendingChange[] = parsedData.changes.map((change: ParsedChange, index: number) => 
                 this._stateManager.createPendingChangeFromParsed(change, index)
             );
             
@@ -253,13 +256,23 @@ export class DifferProvider implements vscode.WebviewViewProvider {
         this._stateManager.setLoading(true);
         
         const changesToApply = this._stateManager.getSelectedChanges().filter(c => data.selectedChanges.includes(c.id));
-        
+        const originalParsedInput = this._stateManager.getState().parsedInput;
+
         try {
             if (changesToApply.length === 0) {
                 this._logger.warn("Apply changes requested, but no changes were actually selected or found in state.");
                 return;
             }
             
+            if (!originalParsedInput) {
+                this._logger.error("Cannot apply changes, parsedInput is missing from state.");
+                this._stateManager.setGlobalValidationErrors([{
+                    type: 'json_parse',
+                    message: `Internal error: Parsed input is missing. Please parse again.`,
+                }]);
+                return;
+            }
+
             // Check if any selected changes have validation errors
             const invalidChanges = changesToApply.filter(change => !change.isValid);
             if (invalidChanges.length > 0) {
@@ -275,9 +288,22 @@ export class DifferProvider implements vscode.WebviewViewProvider {
                 }]);
                 return;
             }
+
+            const inputForApplication: ParsedInput = {
+                description: originalParsedInput.description,
+                changes: changesToApply.map(pc => ({
+                    file: pc.file,
+                    action: pc.action,
+                    target: pc.target,
+                    code: pc.code,
+                    class: pc.class,
+                    description: pc.description,
+                })),
+                metadata: originalParsedInput.metadata
+            };
             
             this._logger.info(`Executing 'differ.applyChanges' command with ${changesToApply.length} changes.`);
-            await vscode.commands.executeCommand('differ.applyChanges', changesToApply);
+            await vscode.commands.executeCommand('differ.applyChanges', inputForApplication);
             
             // Mark applied changes as successful
             changesToApply.forEach(change => {
@@ -332,93 +358,33 @@ export class DifferProvider implements vscode.WebviewViewProvider {
             }
             
             const workspaceRoot = workspaceFolders[0].uri;
-            const originalFileUri = vscode.Uri.joinPath(workspaceRoot, change.file);
+            const targetFileUri = vscode.Uri.joinPath(workspaceRoot, change.file);
 
-            this._logger.info(`Constructed originalFileUri for preview: ${originalFileUri.fsPath}`, {
-                workspaceRoot: workspaceRoot.fsPath,
-                changeFile: change.file
-            });
+            // Handle create_file action differently
+            if (change.action === 'create_file') {
+                await this._previewNewFile(change, targetFileUri);
+                return;
+            }
 
+            // For other actions, file must exist
             let originalDocument: vscode.TextDocument;
             try {
-                originalDocument = await vscode.workspace.openTextDocument(originalFileUri);
+                originalDocument = await vscode.workspace.openTextDocument(targetFileUri);
             } catch (e: any) {
-                this._logger.error(`Failed to open original file for preview: ${originalFileUri.fsPath}`, e);
+                this._logger.error(`Failed to open original file for preview: ${targetFileUri.fsPath}`, e);
                 
                 this._stateManager.setChangeValidationErrors(change.id, [{
                     type: 'json_parse',
                     message: `File not found: ${change.file}`,
-                    suggestion: 'Check that the file path is correct',
+                    suggestion: 'Use "create_file" action to create new files, or check that the file path is correct',
                     details: e.message
                 }]);
                 return;
             }
             
-            const originalContent = originalDocument.getText();
-            let modifiedContent = originalContent;
-            let unableToPreviewReason: string | null = null;
-            const EOL = originalDocument.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n';
-
-            // Apply transformations to generate modifiedContent based on change.action
-            if (change.action.toLowerCase().includes('replace')) {
-                if (change.target && change.target.length > 0) {
-                    const targetIndex = originalContent.indexOf(change.target);
-                    if (targetIndex !== -1) {
-                        modifiedContent = originalContent.substring(0, targetIndex) +
-                                          change.code +
-                                          originalContent.substring(targetIndex + change.target.length);
-                    } else {
-                        unableToPreviewReason = `Target text to replace was not found in ${change.file}.\nTarget (first 100 chars): "${change.target.substring(0, 100)}..."`;
-                        modifiedContent = `// PREVIEW NOTE: ${unableToPreviewReason}${EOL}// Proposed code change below:${EOL}${change.code}${EOL}// --- Original File Content ---${EOL}${originalContent}`;
-                    }
-                } else {
-                    unableToPreviewReason = `'target' for replacement is empty or missing. Cannot determine what to replace.`;
-                    modifiedContent = `// PREVIEW NOTE: ${unableToPreviewReason}${EOL}// Proposed code change below:${EOL}${change.code}${EOL}// --- Original File Content ---${EOL}${originalContent}`;
-                }
-            } else if (change.action.toLowerCase().includes('add') || change.action.toLowerCase().includes('insert')) {
-                if (change.target && change.target.toLowerCase().startsWith('line:')) {
-                    const lineNumberStr = change.target.substring('line:'.length);
-                    const lineNumber = parseInt(lineNumberStr, 10);
-
-                    if (!isNaN(lineNumber) && lineNumber >= 1) {
-                        const lines = originalContent.split(EOL);
-                        const spliceIndex = Math.max(0, Math.min(lineNumber - 1, lines.length));
-                        lines.splice(spliceIndex, 0, change.code);
-                        modifiedContent = lines.join(EOL);
-                    } else {
-                        unableToPreviewReason = `Invalid line number in target: '${change.target}'. Appending proposed code instead.`;
-                        modifiedContent = originalContent + (originalContent.length > 0 ? EOL : '') + `// --- Proposed Code (appended due to invalid line target for '${change.action}') ---${EOL}${change.code}`;
-                    }
-                } else {
-                    modifiedContent = originalContent + (originalContent.length > 0 ? EOL : '') + change.code;
-                }
-            } else {
-                unableToPreviewReason = `Action '${change.action}' is not fully supported for precise diff preview. Showing proposed code appended.`;
-                modifiedContent = originalContent + (originalContent.length > 0 ? EOL : '') +
-                                  `// --- Proposed Code for action '${change.action}' (appended due to limited preview support) ---${EOL}` +
-                                  `// Target: ${change.target}${EOL}` +
-                                  `${change.code}`;
-            }
-
-            if (unableToPreviewReason) {
-                this._logger.warn(`Preview limitation for change ${change.id}: ${unableToPreviewReason}`, { change });
-                
-                this._stateManager.setChangeValidationErrors(change.id, [], [{
-                    type: 'missing_description',
-                    message: `Preview limitation: ${unableToPreviewReason}`,
-                    suggestion: 'The diff view shows approximated changes'
-                }]);
-            }
-
-            const diffTitle = `Preview: ${path.basename(change.file)} (${change.action})`;
-            const modifiedDoc = await vscode.workspace.openTextDocument({
-                content: modifiedContent,
-                language: originalDocument.languageId
-            });
-
-            await vscode.commands.executeCommand('vscode.diff', originalDocument.uri, modifiedDoc.uri, diffTitle);
-            this._logger.info(`Showing diff for ${change.id}: ${originalDocument.uri.fsPath} vs. untitled (preview)`);
-
+            // Continue with existing preview logic for file modifications
+            await this._previewFileModification(change, originalDocument);
+            
         } catch (error: any) {
             const errorMessage = error instanceof Error ? error.message : String(error);
             this._logger.error('Failed to generate preview', { error: errorMessage, originalError: error, changeId: data.changeId });
@@ -428,6 +394,142 @@ export class DifferProvider implements vscode.WebviewViewProvider {
                 message: `Preview failed: ${errorMessage}`,
                 suggestion: 'Check the file path and try again'
             }]);
+        }
+    }
+
+    private async _previewFileModification(change: any, originalDocument: vscode.TextDocument) {
+        const originalContent = originalDocument.getText();
+        let modifiedContent = originalContent;
+        let unableToPreviewReason: string | null = null;
+        const EOL = originalDocument.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n';
+
+        // Apply transformations to generate modifiedContent based on change.action
+        if (change.action.toLowerCase().includes('replace')) {
+            if (change.target && change.target.length > 0) {
+                const targetIndex = originalContent.indexOf(change.target);
+                if (targetIndex !== -1) {
+                    modifiedContent = originalContent.substring(0, targetIndex) +
+                                    change.code +
+                                    originalContent.substring(targetIndex + change.target.length);
+                } else {
+                    unableToPreviewReason = `Target text to replace was not found in ${change.file}.\nTarget (first 100 chars): "${change.target.substring(0, 100)}..."`;
+                    modifiedContent = `// PREVIEW NOTE: ${unableToPreviewReason}${EOL}// Proposed code change below:${EOL}${change.code}${EOL}// --- Original File Content ---${EOL}${originalContent}`;
+                }
+            } else {
+                unableToPreviewReason = `'target' for replacement is empty or missing. Cannot determine what to replace.`;
+                modifiedContent = `// PREVIEW NOTE: ${unableToPreviewReason}${EOL}// Proposed code change below:${EOL}${change.code}${EOL}// --- Original File Content ---${EOL}${originalContent}`;
+            }
+        } else if (change.action.toLowerCase().includes('add') || change.action.toLowerCase().includes('insert')) {
+            if (change.target && change.target.toLowerCase().startsWith('line:')) {
+                const lineNumberStr = change.target.substring('line:'.length);
+                const lineNumber = parseInt(lineNumberStr, 10);
+
+                if (!isNaN(lineNumber) && lineNumber >= 1) {
+                    const lines = originalContent.split(EOL);
+                    const spliceIndex = Math.max(0, Math.min(lineNumber - 1, lines.length));
+                    lines.splice(spliceIndex, 0, change.code);
+                    modifiedContent = lines.join(EOL);
+                } else {
+                    unableToPreviewReason = `Invalid line number in target: '${change.target}'. Appending proposed code instead.`;
+                    modifiedContent = originalContent + (originalContent.length > 0 ? EOL : '') + `// --- Proposed Code (appended due to invalid line target for '${change.action}') ---${EOL}${change.code}`;
+                }
+            } else {
+                modifiedContent = originalContent + (originalContent.length > 0 ? EOL : '') + change.code;
+            }
+        } else {
+            unableToPreviewReason = `Action '${change.action}' is not fully supported for precise diff preview. Showing proposed code appended.`;
+            modifiedContent = originalContent + (originalContent.length > 0 ? EOL : '') +
+                            `// --- Proposed Code for action '${change.action}' (appended due to limited preview support) ---${EOL}` +
+                            `// Target: ${change.target}${EOL}` +
+                            `${change.code}`;
+        }
+
+        if (unableToPreviewReason) {
+            this._logger.warn(`Preview limitation for change ${change.id}: ${unableToPreviewReason}`);
+            
+            this._stateManager.setChangeValidationErrors(change.id, [], [{
+                type: 'missing_description',
+                message: `Preview limitation: ${unableToPreviewReason}`,
+                suggestion: 'The diff view shows approximated changes'
+            }]);
+        }
+
+        const diffTitle = `Preview: ${path.basename(change.file)} (${change.action})`;
+        const modifiedDoc = await vscode.workspace.openTextDocument({
+            content: modifiedContent,
+            language: originalDocument.languageId
+        });
+
+        await vscode.commands.executeCommand('vscode.diff', originalDocument.uri, modifiedDoc.uri, diffTitle);
+        this._logger.info(`Showing diff for ${change.id}: ${originalDocument.uri.fsPath} vs. modified content`);
+    }
+
+    private async _previewNewFile(change: any, targetFileUri: vscode.Uri) {
+        this._logger.info(`Previewing new file creation: ${targetFileUri.fsPath}`);
+        
+        try {
+            // Check if file already exists (for overwrite warning)
+            let fileExists = false;
+            let originalContent = '';
+            
+            try {
+                const originalDocument = await vscode.workspace.openTextDocument(targetFileUri);
+                originalContent = originalDocument.getText();
+                fileExists = true;
+                this._logger.info(`File exists and will be overwritten: ${targetFileUri.fsPath}`);
+            } catch {
+                // File doesn't exist - this is expected for create_file
+                this._logger.info(`Creating new file: ${targetFileUri.fsPath}`);
+            }
+
+            // Create the new file content document
+            const newFileContent = change.code;
+            const fileExtension = change.file.split('.').pop() || 'txt';
+            
+            // Determine language ID from file extension
+            const languageMap: { [key: string]: string } = {
+                'ts': 'typescript',
+                'js': 'javascript',
+                'py': 'python',
+                'java': 'java',
+                'cpp': 'cpp',
+                'c': 'c',
+                'rs': 'rust',
+                'go': 'go',
+                'json': 'json',
+                'xml': 'xml',
+                'html': 'html',
+                'css': 'css',
+                'md': 'markdown'
+            };
+            
+            const languageId = languageMap[fileExtension] || 'plaintext';
+            
+            const newDocument = await vscode.workspace.openTextDocument({
+                content: newFileContent,
+                language: languageId
+            });
+
+            // Show appropriate diff
+            if (fileExists) {
+                // Show overwrite diff
+                const diffTitle = `Create File (Overwrite): ${path.basename(change.file)}`;
+                const originalDocument = await vscode.workspace.openTextDocument(targetFileUri);
+                await vscode.commands.executeCommand('vscode.diff', originalDocument.uri, newDocument.uri, diffTitle);
+            } else {
+                // Show new file content
+                const diffTitle = `Create New File: ${path.basename(change.file)}`;
+                await vscode.commands.executeCommand('vscode.diff', 
+                    vscode.Uri.parse('untitled:Empty File'), 
+                    newDocument.uri, 
+                    diffTitle
+                );
+            }
+
+            this._logger.info(`Successfully previewed ${fileExists ? 'file overwrite' : 'new file creation'}: ${change.file}`);
+            
+        } catch (error) {
+            throw new Error(`Failed to preview new file: ${error}`);
         }
     }
     

@@ -1,24 +1,20 @@
 import * as vscode from 'vscode';
-import { ValidationError, ValidationWarning } from '../parser/inputParser';
+import { ValidationError, ValidationWarning, ChangeAction, ParsedInput, ParsedChange } from '../parser/inputParser';
 
 export interface PendingChange {
     id: string;
     file: string;
-    action: string;
+    action: ChangeAction;
     target: string;
     code: string;
     class?: string;
+    description?: string; // Add this line
     selected: boolean;
     status: 'pending' | 'applied' | 'failed' | 'error' | 'validation_error';
     error?: string; // Legacy error field for backwards compatibility
     validationErrors: ValidationError[];  // NEW: Per-change validation errors
     validationWarnings: ValidationWarning[]; // NEW: Per-change validation warnings
     isValid: boolean;  // NEW: Quick validation check
-}
-
-export interface ParsedInput {
-    description: string;
-    changes: any[];
 }
 
 export interface UIState {
@@ -433,7 +429,7 @@ export class UIStateManager {
         this._updateState({ pendingChanges: newChanges });
     }
     
-    public createPendingChangeFromParsed(parsedChange: any, index: number): PendingChange {
+    public createPendingChangeFromParsed(parsedChange: ParsedChange, index: number): PendingChange {
         return {
             id: `change-${Date.now()}-${index}-${Math.random().toString(36).substring(2, 7)}`,
             file: parsedChange.file,
@@ -441,6 +437,7 @@ export class UIStateManager {
             target: parsedChange.target,
             code: parsedChange.code,
             class: parsedChange.class,
+            description: parsedChange.description,
             selected: true, // Default to selected
             status: 'pending',
             validationErrors: [],

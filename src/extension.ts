@@ -11,7 +11,7 @@ interface DifferState {
 export function activate(context: vscode.ExtensionContext) {
     console.log('🚀 Differ extension is now active!');
     
-    // Extension state
+    // Extension state (for legacy command palette flow)
     const state: DifferState = {
         parsedInput: null,
         lastValidationResult: null,
@@ -29,7 +29,11 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.registerCommand('differ.openPanel', () => provider.show()),
         vscode.commands.registerCommand('differ.parseInput', () => parseUserInput(state)),
         vscode.commands.registerCommand('differ.previewChanges', () => previewChanges(state)),
-        vscode.commands.registerCommand('differ.applyChanges', () => applyChanges(state)),
+        // The command now handles input from the webview or from the legacy state
+        vscode.commands.registerCommand('differ.applyChanges', (inputFromWebview?: ParsedInput) => {
+            const effectiveInput = inputFromWebview || state.parsedInput;
+            applyChanges(effectiveInput);
+        }),
         vscode.commands.registerCommand('differ.clearChanges', () => {
             clearChanges(state);
             provider.clearChanges(); // Also clear the webview state
@@ -121,8 +125,8 @@ async function showPreview(content: string) {
     });
 }
 
-async function applyChanges(state: DifferState) {
-    if (!state.parsedInput) {
+async function applyChanges(input: ParsedInput | null) {
+    if (!input) {
         vscode.window.showErrorMessage('No changes to apply. Parse input first.');
         return;
     }
@@ -139,7 +143,7 @@ async function applyChanges(state: DifferState) {
         
         // Updated to validate each change individually with its action
         const fileValidations = await Promise.all(
-            state.parsedInput.changes.map(async (change, index) => ({
+            input.changes.map(async (change, index) => ({
                 change,
                 changeIndex: index,
                 validation: await ChangeParser.validateFileAccess(change.file, workspace, change.action)
@@ -176,10 +180,10 @@ async function applyChanges(state: DifferState) {
         }
 
         // Confirm before applying
-        const createFileChanges = state.parsedInput.changes.filter(c => c.action === 'create_file');
-        const modifyFileChanges = state.parsedInput.changes.filter(c => c.action !== 'create_file');
+        const createFileChanges = input.changes.filter(c => c.action === 'create_file');
+        const modifyFileChanges = input.changes.filter(c => c.action !== 'create_file');
         
-        let confirmMessage = `Apply ${state.parsedInput.changes.length} changes?`;
+        let confirmMessage = `Apply ${input.changes.length} changes?`;
         let detailMessage = '';
         
         if (createFileChanges.length > 0) {
@@ -189,7 +193,7 @@ async function applyChanges(state: DifferState) {
             detailMessage += `• ${modifyFileChanges.length} existing files will be modified\n`;
         }
         
-        const affectedFiles = [...new Set(state.parsedInput.changes.map(c => c.file))];
+        const affectedFiles = [...new Set(input.changes.map(c => c.file))];
         detailMessage += `• ${affectedFiles.length} total files affected`;
 
         const confirmResult = await vscode.window.showWarningMessage(
@@ -207,7 +211,7 @@ async function applyChanges(state: DifferState) {
 
         // Apply changes
         vscode.window.showInformationMessage('Applying changes...');
-        await applyParsedChanges(state.parsedInput, workspace);
+        await applyParsedChanges(input, workspace);
         
         // Success message with breakdown
         let successMessage = 'Changes applied successfully!';
@@ -238,28 +242,43 @@ async function applyChangesToFile(filePath: string, changes: any[], workspace: v
     const fullPath = vscode.Uri.joinPath(workspace.uri, filePath);
     
     try {
-        // Check if any changes are create_file actions
+        // Separate create_file actions from other actions
         const createFileChanges = changes.filter(c => c.action === 'create_file');
         const otherChanges = changes.filter(c => c.action !== 'create_file');
         
+        // Validation: Only one create_file action per file
         if (createFileChanges.length > 1) {
             throw new Error(`Multiple create_file actions for ${filePath} - only one is allowed per file`);
         }
         
         let content = '';
+        let fileExists = false;
         
+        // Check if file exists
+        try {
+            const fileData = await vscode.workspace.fs.readFile(fullPath);
+            content = Buffer.from(fileData).toString('utf8');
+            fileExists = true;
+        } catch {
+            // File doesn't exist
+            fileExists = false;
+        }
+        
+        // Handle create_file action
         if (createFileChanges.length === 1) {
-            // Use create_file content as the base
-            content = createFileChanges[0].code;
-            console.log(`Creating new file: ${filePath}`);
-        } else {
-            // Try to read existing file for other actions
-            try {
-                const fileData = await vscode.workspace.fs.readFile(fullPath);
-                content = Buffer.from(fileData).toString('utf8');
-            } catch {
-                throw new Error(`File ${filePath} does not exist. Use "create_file" action to create new files.`);
+            const createChange = createFileChanges[0];
+            
+            if (fileExists) {
+                console.log(`Overwriting existing file: ${filePath}`);
+            } else {
+                console.log(`Creating new file: ${filePath}`);
             }
+            
+            // For create_file, use the provided code as the complete file content
+            content = createChange.code;
+        } else if (!fileExists && otherChanges.length > 0) {
+            // No create_file action but file doesn't exist and we have other changes
+            throw new Error(`File ${filePath} does not exist. Use "create_file" action to create new files.`);
         }
 
         // Apply all other changes to the content
@@ -268,11 +287,19 @@ async function applyChangesToFile(filePath: string, changes: any[], workspace: v
             modifiedContent = applyChange(modifiedContent, change);
         }
 
-        // Write the modified content back
+        // Write the final content to the file
         const writeData = Buffer.from(modifiedContent, 'utf8');
         await vscode.workspace.fs.writeFile(fullPath, writeData);
         
-        console.log(`Applied ${changes.length} changes to ${filePath}`);
+        const actionSummary = [];
+        if (createFileChanges.length > 0) {
+            actionSummary.push(fileExists ? 'overwritten' : 'created');
+        }
+        if (otherChanges.length > 0) {
+            actionSummary.push(`${otherChanges.length} modifications applied`);
+        }
+        
+        console.log(`File ${filePath}: ${actionSummary.join(', ')}`);
         
     } catch (error) {
         throw new Error(`Failed to apply changes to ${filePath}: ${error}`);
@@ -282,7 +309,8 @@ async function applyChangesToFile(filePath: string, changes: any[], workspace: v
 function applyChange(content: string, change: any): string {
     switch (change.action) {
         case 'create_file':
-            // For create_file, ignore the input content and return the new code
+            // This should not be called for create_file as it's handled separately
+            console.warn(`create_file action should be handled separately, not in applyChange`);
             return change.code;
             
         case 'add_import':
