@@ -31,7 +31,8 @@ export type ChangeAction =
     | 'insert_after'
     | 'insert_before'
     | 'delete_function'
-    | 'modify_line';
+    | 'modify_line'
+    | 'create_file';
 
 export interface ValidationError {
     type: 'json_parse' | 'missing_field' | 'invalid_type' | 'invalid_action' | 'empty_array' | 'duplicate_change';
@@ -67,7 +68,7 @@ export class ChangeParser {
     private static readonly VALID_ACTIONS: ChangeAction[] = [
         'add_import', 'replace_function', 'add_function', 'replace_method', 'add_method',
         'add_struct', 'add_enum', 'replace_block', 'insert_after', 'insert_before',
-        'delete_function', 'modify_line'
+        'delete_function', 'modify_line', 'create_file'
     ];
 
     private static readonly MAX_REASONABLE_CHANGES = 50;
@@ -322,6 +323,30 @@ export class ChangeParser {
             }
         }
 
+        // Create file specific validation
+        if (change.action === 'create_file') {
+            if (!change.code || change.code.trim() === '') {
+                errors.push({
+                    type: 'missing_field',
+                    changeIndex: index,
+                    field: 'code',
+                    message: `Change ${index + 1}: "create_file" requires non-empty "code" field with file content`,
+                    suggestion: 'Provide the complete file content in the "code" field'
+                });
+            }
+            
+            // For create_file, target should be the filename or description
+            if (!change.target || change.target.trim() === '') {
+                warnings.push({
+                    type: 'missing_description',
+                    changeIndex: index,
+                    field: 'target',
+                    message: `Change ${index + 1}: "create_file" should specify filename or description in "target"`,
+                    suggestion: 'Use "target" to specify the new filename or provide a description'
+                });
+            }
+        }
+
         // Warnings
         if (change.code && change.code.length > this.MAX_CODE_LENGTH) {
             warnings.push({
@@ -478,7 +503,7 @@ export class ChangeParser {
     /**
      * Validate file accessibility (moved from old implementation)
      */
-    public static async validateFileAccess(filePath: string, workspace: vscode.WorkspaceFolder): Promise<FileValidationResult> {
+    public static async validateFileAccess(filePath: string, workspace: vscode.WorkspaceFolder, action: ChangeAction): Promise<FileValidationResult> {
         const errors: ValidationError[] = [];
         const warnings: ValidationWarning[] = [];
 
@@ -488,22 +513,43 @@ export class ChangeParser {
             try {
                 await vscode.workspace.fs.stat(fullPath);
                 
-                try {
-                    await vscode.workspace.fs.readFile(fullPath);
-                } catch (readError) {
-                    errors.push({
-                        type: 'json_parse', // Reusing type, could add new file-specific types
-                        message: `File exists but cannot be read: ${filePath}`,
-                        suggestion: 'Check file permissions'
+                // File exists - check if we can read it (unless it's create_file which would overwrite)
+                if (action !== 'create_file') {
+                    try {
+                        await vscode.workspace.fs.readFile(fullPath);
+                    } catch (readError) {
+                        errors.push({
+                            type: 'json_parse',
+                            message: `File exists but cannot be read: ${filePath}`,
+                            suggestion: 'Check file permissions'
+                        });
+                    }
+                } else {
+                    // create_file action on existing file - warn about overwrite
+                    warnings.push({
+                        type: 'missing_description',
+                        message: `File already exists and will be overwritten: ${filePath}`,
+                        suggestion: 'Use a different action if you want to modify rather than replace the file'
                     });
                 }
                 
             } catch (statError) {
-                warnings.push({
-                    type: 'missing_description', // Reusing type
-                    message: `Target file does not exist: ${filePath} (will be created if needed)`,
-                    suggestion: 'Verify the file path is correct'
-                });
+                // File doesn't exist
+                if (action === 'create_file') {
+                    // This is expected and OK for create_file
+                    warnings.push({
+                        type: 'missing_description',
+                        message: `New file will be created: ${filePath}`,
+                        suggestion: 'Verify the file path and content are correct'
+                    });
+                } else {
+                    // For all other actions, missing file is an error
+                    errors.push({
+                        type: 'json_parse',
+                        message: `Target file does not exist: ${filePath}`,
+                        suggestion: `Use "create_file" action if you want to create a new file, or verify the file path is correct`
+                    });
+                }
             }
 
         } catch (error) {

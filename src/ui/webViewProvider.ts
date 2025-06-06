@@ -472,38 +472,42 @@ export class DifferProvider implements vscode.WebviewViewProvider {
             this._stateManager.setValidationInProgress(true);
             this._logger.info('Starting target existence validation');
 
-            // Run full validation with target existence checking
-            const validationSummary = await ValidationEngine.validateChanges(parsedInput, workspace, {
-                validateTargetExistence: true,
-                parallelValidation: true,
-                timeoutMs: 30000
-            });
+            // Updated to pass action parameter for each change
+            const fileValidations = await Promise.all(
+                parsedInput.changes.map(async (change, index) => ({
+                    changeIndex: index,
+                    change: change,
+                    validation: await ChangeParser.validateFileAccess(change.file, workspace, change.action)
+                }))
+            );
 
             this._logger.info('Target validation completed', {
-                overallValid: validationSummary.overallValid,
-                invalidChanges: validationSummary.summary.invalidChanges,
-                processingTime: validationSummary.summary.processingTimeMs
+                totalChanges: fileValidations.length,
+                invalidChanges: fileValidations.filter(fv => !fv.validation.isValid).length
             });
 
             // Update each change with its validation results
-            for (const changeValidation of validationSummary.changeValidations) {
-                const changeId = this._stateManager.getState().pendingChanges[changeValidation.changeIndex]?.id;
+            for (const fileValidation of fileValidations) {
+                const changeId = this._stateManager.getState().pendingChanges[fileValidation.changeIndex]?.id;
                 if (changeId) {
                     this._stateManager.setChangeValidationErrors(
                         changeId, 
-                        changeValidation.errors, 
-                        changeValidation.warnings
+                        fileValidation.validation.errors, 
+                        fileValidation.validation.warnings
                     );
                 }
             }
 
-            // Update global validation state with any new global errors
-            if (validationSummary.suggestions.length > 0) {
+            // Collect global suggestions
+            const allWarnings = fileValidations.flatMap(fv => fv.validation.warnings);
+            const allErrors = fileValidations.flatMap(fv => fv.validation.errors);
+            
+            if (allWarnings.length > 0 || allErrors.length > 0) {
                 const currentState = this._stateManager.getState();
-                const newWarnings: ValidationWarning[] = validationSummary.suggestions.map((suggestion: string) => ({
+                const newWarnings: ValidationWarning[] = allWarnings.map((warning: any) => ({
                     type: 'missing_description',
-                    message: suggestion,
-                    suggestion: 'Review and address this issue'
+                    message: warning.message,
+                    suggestion: warning.suggestion || 'Review and address this issue'
                 }));
                 
                 this._stateManager.setGlobalValidationErrors(

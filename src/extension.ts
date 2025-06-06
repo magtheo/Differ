@@ -137,31 +137,36 @@ async function applyChanges(state: DifferState) {
         // Now validate file access when actually needed
         vscode.window.showInformationMessage('Validating file access...');
         
+        // Updated to validate each change individually with its action
         const fileValidations = await Promise.all(
-            state.parsedInput.metadata!.affectedFiles.map(async (file) => ({
-                file,
-                validation: await ChangeParser.validateFileAccess(file, workspace)
+            state.parsedInput.changes.map(async (change, index) => ({
+                change,
+                changeIndex: index,
+                validation: await ChangeParser.validateFileAccess(change.file, workspace, change.action)
             }))
         );
 
-        // Check for file access errors
+        // Check for file access errors (excluding create_file actions on missing files)
         const fileErrors = fileValidations
             .filter(fv => !fv.validation.isValid)
-            .map(fv => `${fv.file}: ${fv.validation.errors.join(', ')}`);
+            .map(fv => `${fv.change.file} (${fv.change.action}): ${fv.validation.errors.join(', ')}`);
 
         if (fileErrors.length > 0) {
             vscode.window.showErrorMessage(`File access errors: ${fileErrors.join('; ')}`);
             return;
         }
 
-        // Show file warnings
+        // Show file warnings (including create_file overwrite warnings)
         const fileWarnings = fileValidations
-            .flatMap(fv => fv.validation.warnings.map(w => `${fv.file}: ${w}`));
+            .flatMap(fv => fv.validation.warnings.map(w => `${fv.change.file} (${fv.change.action}): ${w.message}`));
         
         if (fileWarnings.length > 0) {
             const proceed = await vscode.window.showWarningMessage(
                 `File warnings detected. Continue anyway?`,
-                { detail: fileWarnings.join('\n') },
+                { 
+                    detail: fileWarnings.join('\n'),
+                    modal: true 
+                },
                 'Yes', 'No'
             );
             
@@ -171,9 +176,28 @@ async function applyChanges(state: DifferState) {
         }
 
         // Confirm before applying
+        const createFileChanges = state.parsedInput.changes.filter(c => c.action === 'create_file');
+        const modifyFileChanges = state.parsedInput.changes.filter(c => c.action !== 'create_file');
+        
+        let confirmMessage = `Apply ${state.parsedInput.changes.length} changes?`;
+        let detailMessage = '';
+        
+        if (createFileChanges.length > 0) {
+            detailMessage += `• ${createFileChanges.length} new files will be created\n`;
+        }
+        if (modifyFileChanges.length > 0) {
+            detailMessage += `• ${modifyFileChanges.length} existing files will be modified\n`;
+        }
+        
+        const affectedFiles = [...new Set(state.parsedInput.changes.map(c => c.file))];
+        detailMessage += `• ${affectedFiles.length} total files affected`;
+
         const confirmResult = await vscode.window.showWarningMessage(
-            `Apply ${state.parsedInput.changes.length} changes to ${state.parsedInput.metadata!.affectedFiles.length} files?`,
-            { modal: true },
+            confirmMessage,
+            { 
+                modal: true,
+                detail: detailMessage 
+            },
             'Apply Changes', 'Cancel'
         );
 
@@ -185,7 +209,16 @@ async function applyChanges(state: DifferState) {
         vscode.window.showInformationMessage('Applying changes...');
         await applyParsedChanges(state.parsedInput, workspace);
         
-        vscode.window.showInformationMessage('Changes applied successfully!');
+        // Success message with breakdown
+        let successMessage = 'Changes applied successfully!';
+        if (createFileChanges.length > 0) {
+            successMessage += ` Created ${createFileChanges.length} new files.`;
+        }
+        if (modifyFileChanges.length > 0) {
+            successMessage += ` Modified ${modifyFileChanges.length} existing files.`;
+        }
+        
+        vscode.window.showInformationMessage(successMessage);
         
     } catch (error) {
         const message = error instanceof Error ? error.message : 'Unknown error';
@@ -205,20 +238,33 @@ async function applyChangesToFile(filePath: string, changes: any[], workspace: v
     const fullPath = vscode.Uri.joinPath(workspace.uri, filePath);
     
     try {
-        // Try to read existing file
+        // Check if any changes are create_file actions
+        const createFileChanges = changes.filter(c => c.action === 'create_file');
+        const otherChanges = changes.filter(c => c.action !== 'create_file');
+        
+        if (createFileChanges.length > 1) {
+            throw new Error(`Multiple create_file actions for ${filePath} - only one is allowed per file`);
+        }
+        
         let content = '';
-        try {
-            const fileData = await vscode.workspace.fs.readFile(fullPath);
-            content = Buffer.from(fileData).toString('utf8');
-        } catch {
-            // File doesn't exist - will be created
+        
+        if (createFileChanges.length === 1) {
+            // Use create_file content as the base
+            content = createFileChanges[0].code;
             console.log(`Creating new file: ${filePath}`);
+        } else {
+            // Try to read existing file for other actions
+            try {
+                const fileData = await vscode.workspace.fs.readFile(fullPath);
+                content = Buffer.from(fileData).toString('utf8');
+            } catch {
+                throw new Error(`File ${filePath} does not exist. Use "create_file" action to create new files.`);
+            }
         }
 
-        // Apply each change to the content
+        // Apply all other changes to the content
         let modifiedContent = content;
-        
-        for (const change of changes) {
+        for (const change of otherChanges) {
             modifiedContent = applyChange(modifiedContent, change);
         }
 
@@ -234,10 +280,11 @@ async function applyChangesToFile(filePath: string, changes: any[], workspace: v
 }
 
 function applyChange(content: string, change: any): string {
-    // This is where you'd implement the actual change application logic
-    // For now, just a placeholder that shows the concept
-    
     switch (change.action) {
+        case 'create_file':
+            // For create_file, ignore the input content and return the new code
+            return change.code;
+            
         case 'add_import':
             return addImport(content, change.code);
         

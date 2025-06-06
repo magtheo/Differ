@@ -537,9 +537,19 @@ function createChangeElement(change) {
     const isSelected = currentState.selectedChanges.includes(change.id);
     const isProcessing = currentState.isLoading || currentState.validationInProgress;
     
+    // Special styling for create_file actions
+    if (change.action === 'create_file') {
+        div.classList.add('create-file-change');
+    }
+    
     // Determine status display
     const statusIcon = getStatusIcon(change);
     const statusClass = getStatusClass(change);
+    
+    // Special warning for create_file on existing files
+    const hasOverwriteWarning = change.action === 'create_file' && 
+        change.validationWarnings && 
+        change.validationWarnings.some(w => w.message.includes('will be overwritten'));
     
     div.innerHTML = `
         <input
@@ -557,13 +567,19 @@ function createChangeElement(change) {
             <div class="change-details">
                 <span class="change-detail">📄 ${escapeHtml(change.file)}</span>
                 <span class="change-detail">🔧 ${escapeHtml(change.action)}</span>
-                <span class="change-detail">🎯 ${escapeHtml(change.target)}</span>
+                ${change.action === 'create_file' ? 
+                    `<span class="change-detail">📝 New File</span>` : 
+                    `<span class="change-detail">🎯 ${escapeHtml(change.target)}</span>`
+                }
                 ${change.class ? `<span class="change-detail">📦 ${escapeHtml(change.class)}</span>` : ''}
+                ${hasOverwriteWarning ? `<span class="change-detail warning">⚠️ Will Overwrite</span>` : ''}
             </div>
             ${renderChangeValidationErrors(change)}
             ${change.error ? `<div class="legacy-error error">${escapeHtml(change.error)}</div>` : ''}
             <div class="change-actions">
-                <button class="secondary preview-btn" data-change-id="${change.id}" ${isProcessing ? 'disabled' : ''}>Preview</button>
+                <button class="secondary preview-btn" data-change-id="${change.id}" ${isProcessing ? 'disabled' : ''}>
+                    ${change.action === 'create_file' ? 'Preview New File' : 'Preview'}
+                </button>
             </div>
         </div>
     `;
@@ -648,7 +664,8 @@ function getChangeTitle(change) {
         'add_function': '➕ Add Function',
         'add_method': '➕ Add Method',
         'add_import': '📥 Add Import',
-        'replace_variable': '🔄 Replace Variable'
+        'replace_variable': '🔄 Replace Variable',
+        'create_file': '📝 Create File'  // NEW
     };
     return actionMap[change.action] || `🔧 ${change.action}`;
 }

@@ -582,3 +582,31 @@ textarea:focus {
         gap: 4px;
     }
 }
+
+/* Special styling for create_file changes */
+.change-item.create-file-change {
+    border-left: 3px solid var(--vscode-terminal-ansiGreen);
+    background-color: rgba(22, 163, 74, 0.05);
+}
+
+.change-item.create-file-change.invalid {
+    border-left: 3px solid var(--vscode-errorForeground);
+    background-color: rgba(239, 68, 68, 0.05);
+}
+
+/* Warning styling for change details */
+.change-detail.warning {
+    background-color: rgba(255, 193, 7, 0.2);
+    color: var(--vscode-notificationsWarningIcon-foreground);
+    font-weight: 600;
+}
+
+/* Enhanced visual feedback for file creation */
+.change-item.create-file-change .change-title {
+    font-weight: 600;
+    color: var(--vscode-terminal-ansiGreen);
+}
+
+.change-item.create-file-change.invalid .change-title {
+    color: var(--vscode-errorForeground);
+}
