@@ -1,0 +1,3 @@
+# Project-specific ignore patterns for LLM Context Builder (Qt)
+# One pattern (relative path from root) per line.
+out
