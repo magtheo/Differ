@@ -1,4 +1,4 @@
-console.log('=== WEBVIEW MAIN.JS STARTING ===');
+console.log('=== WEBVIEW MAIN.JS STARTING (Comment-Based Format) ===');
 console.log('Document ready state:', document.readyState);
 console.log('VS Code API available:', typeof acquireVsCodeApi);
 
@@ -7,7 +7,7 @@ const vscode = acquireVsCodeApi();
 
 // State management
 let currentState = {
-    jsonInput: '',
+    jsonInput: '', // Keeping name for compatibility, but now contains comment format
     parsedInput: null,
     pendingChanges: [],
     selectedChanges: [],
@@ -24,19 +24,21 @@ let elements = {};
 
 // Initialize when DOM is loaded
 document.addEventListener('DOMContentLoaded', function() {
-    console.log('DOM Content Loaded. Initializing...');
+    console.log('DOM Content Loaded. Initializing comment-based format UI...');
     initializeElements();
     attachEventListeners();
     updateUI();
-    console.log('Initialization complete. Waiting for messages or user interaction.');
+    console.log('Initialization complete. Ready for comment-based input.');
 });
 
 function initializeElements() {
-    console.log('Initializing DOM elements.');
+    console.log('Initializing DOM elements for comment-based format.');
     elements = {
-        jsonInput: document.getElementById('jsonInput'),
+        inputTextarea: document.getElementById('inputTextarea'),
         parseBtn: document.getElementById('parseBtn'),
         clearInputBtn: document.getElementById('clearInputBtn'),
+        showExampleBtn: document.getElementById('showExampleBtn'),
+        showHelpBtn: document.getElementById('showHelpBtn'),
         
         statusSection: document.getElementById('statusSection'),
         loadingIndicator: document.getElementById('loadingIndicator'),
@@ -70,12 +72,14 @@ function initializeElements() {
 }
 
 function attachEventListeners() {
-    console.log('Attaching event listeners.');
+    console.log('Attaching event listeners for comment-based format.');
     
     // Input section
-    if (elements.jsonInput) elements.jsonInput.addEventListener('input', handleJsonInputChange);
+    if (elements.inputTextarea) elements.inputTextarea.addEventListener('input', handleInputChange);
     if (elements.parseBtn) elements.parseBtn.addEventListener('click', handleParseInput);
     if (elements.clearInputBtn) elements.clearInputBtn.addEventListener('click', handleClearInput);
+    if (elements.showExampleBtn) elements.showExampleBtn.addEventListener('click', handleShowExample);
+    if (elements.showHelpBtn) elements.showHelpBtn.addEventListener('click', handleShowHelp);
     
     // Validation section
     if (elements.retryValidationBtn) elements.retryValidationBtn.addEventListener('click', handleRetryValidation);
@@ -83,6 +87,7 @@ function attachEventListeners() {
     // Changes section
     if (elements.applySelectedBtn) elements.applySelectedBtn.addEventListener('click', handleApplySelected);
     if (elements.selectOnlyValidBtn) elements.selectOnlyValidBtn.addEventListener('click', handleSelectOnlyValid);
+    if (elements.validateTargetsBtn) elements.validateTargetsBtn.addEventListener('click', handleValidateTargets);
     if (elements.clearChangesBtn) elements.clearChangesBtn.addEventListener('click', handleClearChanges);
     
     // History section
@@ -95,7 +100,7 @@ function attachEventListeners() {
 }
 
 // Event handlers
-function handleJsonInputChange(event) {
+function handleInputChange(event) {
     currentState.jsonInput = event.target.value;
     const hasContent = currentState.jsonInput.trim().length > 0;
     
@@ -120,22 +125,22 @@ function handleJsonInputChange(event) {
 }
 
 function handleParseInput() {
-    const jsonInput = elements.jsonInput ? elements.jsonInput.value.trim() : '';
-    console.log('Parse button clicked. Input length:', jsonInput.length, 'isLoading:', currentState.isLoading);
+    const input = elements.inputTextarea ? elements.inputTextarea.value.trim() : '';
+    console.log('Parse button clicked. Input length:', input.length, 'isLoading:', currentState.isLoading);
     
-    if (!jsonInput || currentState.isLoading || currentState.validationInProgress) {
+    if (!input || currentState.isLoading || currentState.validationInProgress) {
         console.warn('ParseInput handler: No input or currently processing. Aborting.');
         return;
     }
     
-    console.log('Sending parseInput message with data:', jsonInput.substring(0, 100) + '...');
-    sendMessage('parseInput', { jsonInput });
+    console.log('Sending parseInput message with comment-based data:', input.substring(0, 100) + '...');
+    sendMessage('parseInput', { input });
 }
 
 function handleClearInput() {
     console.log('Clear input button clicked.');
-    if (elements.jsonInput) {
-        elements.jsonInput.value = '';
+    if (elements.inputTextarea) {
+        elements.inputTextarea.value = '';
     }
     currentState.jsonInput = '';
     currentState.globalValidationErrors = [];
@@ -148,6 +153,16 @@ function handleClearInput() {
     
     sendMessage('clearInput');
     updateUI();
+}
+
+function handleShowExample() {
+    console.log('Show example button clicked.');
+    sendMessage('showExample');
+}
+
+function handleShowHelp() {
+    console.log('Show help button clicked.');
+    sendMessage('showHelp');
 }
 
 function handleRetryValidation() {
@@ -192,12 +207,12 @@ function handleClearChanges() {
 
 function handleShowHistory() {
     console.log('Show history button clicked.');
-    alert('History feature not yet implemented');
+    alert('History feature coming soon!');
 }
 
 function handleUndoLast() {
     console.log('Undo last button clicked.');
-    alert('Undo feature not yet implemented');
+    alert('Undo feature coming soon!');
 }
 
 function handleChangeCheckboxChange(event) {
@@ -237,7 +252,7 @@ function handleExtensionMessage(event) {
 
 // UI updates
 function updateUI() {
-    console.log('Updating UI. Current state overview:', {
+    console.log('Updating UI for comment-based format. Current state overview:', {
         isLoading: currentState.isLoading,
         validationInProgress: currentState.validationInProgress,
         globalErrors: currentState.globalValidationErrors.length,
@@ -256,8 +271,8 @@ function updateUI() {
 
 function updateInputSection() {
     // Update input field
-    if (elements.jsonInput && elements.jsonInput.value !== currentState.jsonInput) {
-        elements.jsonInput.value = currentState.jsonInput;
+    if (elements.inputTextarea && elements.inputTextarea.value !== currentState.jsonInput) {
+        elements.inputTextarea.value = currentState.jsonInput;
     }
     
     // Update parse button state
@@ -268,11 +283,11 @@ function updateInputSection() {
         
         // Update button text based on state
         if (currentState.validationInProgress) {
-            elements.parseBtn.textContent = 'Validating...';
+            elements.parseBtn.textContent = '🔄 Validating...';
         } else if (currentState.isLoading) {
-            elements.parseBtn.textContent = 'Processing...';
+            elements.parseBtn.textContent = '⏳ Processing...';
         } else {
-            elements.parseBtn.textContent = 'Parse Changes';
+            elements.parseBtn.textContent = '🚀 Parse Changes';
         }
         
         console.log(
@@ -280,6 +295,15 @@ function updateInputSection() {
             'isProcessing:', isProcessing,
             'Disabled:', elements.parseBtn.disabled
         );
+    }
+    
+    // Update example/help buttons
+    const isProcessing = currentState.isLoading || currentState.validationInProgress;
+    if (elements.showExampleBtn) {
+        elements.showExampleBtn.disabled = isProcessing;
+    }
+    if (elements.showHelpBtn) {
+        elements.showHelpBtn.disabled = isProcessing;
     }
 }
 
@@ -351,7 +375,7 @@ function updateStatusSection() {
         
         elements.statusSection.classList.remove('hidden');
         elements.successMessage.classList.remove('hidden');
-        elements.successMessage.textContent = `Successfully parsed ${currentState.pendingChanges.length} changes. Description: ${currentState.parsedInput.description || '(no description)'}`;
+        elements.successMessage.textContent = `✅ Successfully parsed ${currentState.pendingChanges.length} changes. ${currentState.parsedInput.description || '(no description)'}`;
         console.log('Status: Success message visible.');
     } else {
         elements.successMessage.classList.add('hidden');
@@ -462,7 +486,7 @@ function updateChangesSection() {
                 elements.validationSummary.textContent = `(${validCount} valid, ${invalidCount} invalid)`;
                 elements.validationSummary.className = 'validation-summary has-errors';
             } else if (validCount > 0) {
-                elements.validationSummary.textContent = '(all valid)';
+                elements.validationSummary.textContent = '(all valid ✅)';
                 elements.validationSummary.className = 'validation-summary all-valid';
             } else {
                 elements.validationSummary.textContent = '';
@@ -490,9 +514,9 @@ function updateChangesSection() {
             
             // Update button text based on validation state
             if (currentState.validationInProgress) {
-                elements.validateTargetsBtn.textContent = 'Validating...';
+                elements.validateTargetsBtn.textContent = '🔄 Validating...';
             } else {
-                elements.validateTargetsBtn.textContent = 'Validate Targets';
+                elements.validateTargetsBtn.textContent = '🔍 Validate Targets';
             }
         }
         
@@ -574,11 +598,12 @@ function createChangeElement(change) {
                 ${change.class ? `<span class="change-detail">📦 ${escapeHtml(change.class)}</span>` : ''}
                 ${hasOverwriteWarning ? `<span class="change-detail warning">⚠️ Will Overwrite</span>` : ''}
             </div>
+            ${change.description ? `<div class="change-description">${escapeHtml(change.description)}</div>` : ''}
             ${renderChangeValidationErrors(change)}
             ${change.error ? `<div class="legacy-error error">${escapeHtml(change.error)}</div>` : ''}
             <div class="change-actions">
                 <button class="secondary preview-btn" data-change-id="${change.id}" ${isProcessing ? 'disabled' : ''}>
-                    ${change.action === 'create_file' ? 'Preview New File' : 'Preview'}
+                    ${change.action === 'create_file' ? '👁️ Preview New File' : '👁️ Preview Changes'}
                 </button>
             </div>
         </div>
@@ -645,9 +670,9 @@ function getStatusIcon(change) {
     switch (change.status) {
         case 'pending': return '⏳';
         case 'applied': return '✅';
-        case 'failed': return '❌';
-        case 'error': return '💥';
-        case 'validation_error': return '🚫';
+        case 'failed': return '💥';
+        case 'error': return '🚫';
+        case 'validation_error': return '⚠️';
         default: return '❓';
     }
 }
@@ -659,15 +684,31 @@ function getStatusClass(change) {
 
 function getChangeTitle(change) {
     const actionMap = {
-        'replace_function': '🔄 Replace Function',
-        'replace_method': '🔄 Replace Method',
+        'create_file': '📝 Create File',
         'add_function': '➕ Add Function',
+        'replace_function': '🔄 Replace Function',
         'add_method': '➕ Add Method',
+        'replace_method': '🔄 Replace Method',
         'add_import': '📥 Add Import',
-        'replace_variable': '🔄 Replace Variable',
-        'create_file': '📝 Create File'  // NEW
+        'add_struct': '🏗️ Add Struct',
+        'add_enum': '📋 Add Enum',
+        'replace_block': '🔄 Replace Block',
+        'insert_after': '⬇️ Insert After',
+        'insert_before': '⬆️ Insert Before',
+        'delete_function': '🗑️ Delete Function',
+        'modify_line': '✏️ Modify Line'
     };
-    return actionMap[change.action] || `🔧 ${change.action}`;
+    
+    const actionTitle = actionMap[change.action] || `🔧 ${change.action}`;
+    
+    // Show description if available, otherwise show target
+    if (change.description && change.description !== change.target) {
+        return `${actionTitle}: ${change.description}`;
+    } else if (change.target) {
+        return `${actionTitle}: ${change.target}`;
+    } else {
+        return actionTitle;
+    }
 }
 
 function escapeHtml(unsafe) {
@@ -682,4 +723,4 @@ function escapeHtml(unsafe) {
          .replace(/'/g, "&#039;");
 }
 
-console.log('main.js script fully parsed.');
+console.log('Comment-based format main.js script fully parsed.');
