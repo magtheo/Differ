@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { FormatDocumentation } from './formatDocumentation';
 
 export interface ParsedChange {
     file: string;           // Target file path (may not exist yet)
@@ -6,7 +7,7 @@ export interface ParsedChange {
     target: string;         // Function name, import name, etc.
     code: string;           // New code to apply
     class?: string;         // For method operations
-    description?: string;
+    description?: string;   // Description of this specific change
 }
 
 export interface ParsedInput {
@@ -35,7 +36,7 @@ export type ChangeAction =
     | 'create_file';
 
 export interface ValidationError {
-    type: 'json_parse' | 'missing_field' | 'invalid_type' | 'invalid_action' | 'empty_array' | 'duplicate_change';
+    type: 'parse_error' | 'missing_field' | 'invalid_action' | 'invalid_format' | 'duplicate_change';
     changeIndex?: number;  // Which change has the error (0-based)
     field?: string;        // Which field is problematic
     message: string;       // Human-readable error
@@ -44,7 +45,7 @@ export interface ValidationError {
 }
 
 export interface ValidationWarning {
-    type: 'missing_description' | 'large_change_count' | 'duplicate_target' | 'long_code_block';
+    type: 'missing_description' | 'large_change_count' | 'duplicate_target' | 'long_code_block' | 'missing_target';
     changeIndex?: number;
     field?: string;
     message: string;
@@ -74,27 +75,39 @@ export class ChangeParser {
     private static readonly MAX_REASONABLE_CHANGES = 50;
     private static readonly MAX_CODE_LENGTH = 10000;
 
+    // Regular expressions for parsing the comment-based format
+    private static readonly CHANGE_PATTERN = /^CHANGE:\s*(.+)$/m;
+    private static readonly FILE_PATTERN = /^FILE:\s*(.+)$/m;
+    private static readonly ACTION_PATTERN = /^ACTION:\s*(.+)$/m;
+    private static readonly TARGET_PATTERN = /^TARGET:\s*(.+)$/m;
+    private static readonly CLASS_PATTERN = /^CLASS:\s*(.+)$/m;
+    private static readonly LINE_PATTERN = /^LINE:\s*(\d+)$/m;
+    private static readonly CODE_DELIMITER = /^---\s*$/m;
+
     /**
-     * Parse JSON input with comprehensive validation
+     * Parse comment-based input format
      */
-    public static parseInput(jsonContent: string): ParsedInput {
-        // First, validate and parse the JSON structure
-        const structureValidation = this.validateJsonStructure(jsonContent);
+    public static parseInput(inputContent: string): ParsedInput {
+        // First, validate structure
+        const structureValidation = this.validateStructure(inputContent);
         
         if (!structureValidation.isValid) {
             const errorMessages = structureValidation.errors.map(e => e.message).join('; ');
-            throw new Error(`JSON validation failed: ${errorMessages}`);
+            throw new Error(`Input validation failed: ${errorMessages}`);
         }
 
-        // If we get here, we know the JSON is structurally valid
-        const rawInput = JSON.parse(jsonContent);
+        // Extract global description
+        const description = this.extractGlobalDescription(inputContent);
+
+        // Split into change blocks
+        const blocks = this.splitIntoChangeBlocks(inputContent);
         
-        // Parse changes with detailed validation
+        // Parse each block
         const changes: ParsedChange[] = [];
         const affectedFiles = new Set<string>();
 
-        for (let i = 0; i < rawInput.changes.length; i++) {
-            const change = this.parseChange(rawInput.changes[i], i);
+        for (let i = 0; i < blocks.length; i++) {
+            const change = this.parseChangeBlock(blocks[i], i);
             changes.push(change);
             affectedFiles.add(change.file);
         }
@@ -103,116 +116,60 @@ export class ChangeParser {
         const metadata = {
             totalChanges: changes.length,
             affectedFiles: Array.from(affectedFiles),
-            hasNewFiles: false // We'll determine this during file validation
+            hasNewFiles: changes.some(c => c.action === 'create_file')
         };
 
         return {
-            description: rawInput.description || 'Code changes',
+            description: description || 'Code changes',
             changes,
             metadata
         };
     }
 
     /**
-     * Validate JSON structure before parsing
+     * Validate the overall structure of the input
      */
-    public static validateJsonStructure(jsonContent: string): ValidationResult {
+    public static validateStructure(inputContent: string): ValidationResult {
         const errors: ValidationError[] = [];
         const warnings: ValidationWarning[] = [];
 
-        // Check if input is empty or whitespace
-        if (!jsonContent || jsonContent.trim() === '') {
+        // Check if input is empty
+        if (!inputContent || inputContent.trim() === '') {
             errors.push({
-                type: 'json_parse',
+                type: 'invalid_format',
                 message: 'Input cannot be empty',
-                suggestion: 'Please paste valid JSON containing a "changes" array'
+                suggestion: 'Please provide changes in the format: CHANGE: description\\nFILE: path\\nACTION: action_type\\n---\\ncode\\n---'
             });
             return { isValid: false, errors, warnings };
         }
 
-        // Try to parse JSON
-        let rawInput: any;
-        try {
-            rawInput = JSON.parse(jsonContent.trim());
-        } catch (parseError) {
-            const errorMessage = parseError instanceof Error ? parseError.message : 'Unknown JSON parsing error';
+        // Check for at least one CHANGE block
+        const changeMatches = inputContent.match(/^CHANGE:/gm);
+        if (!changeMatches || changeMatches.length === 0) {
             errors.push({
-                type: 'json_parse',
-                message: `Invalid JSON format: ${errorMessage}`,
-                details: parseError,
-                suggestion: 'Check for missing quotes, commas, or brackets in your JSON'
+                type: 'invalid_format',
+                message: 'No CHANGE blocks found',
+                suggestion: 'Each change must start with "CHANGE: description of the change"'
             });
             return { isValid: false, errors, warnings };
-        }
-
-        // Validate root object structure
-        if (!rawInput || typeof rawInput !== 'object' || Array.isArray(rawInput)) {
-            errors.push({
-                type: 'invalid_type',
-                message: 'Root element must be a JSON object, not an array or primitive value',
-                suggestion: 'Wrap your data in curly braces: { "description": "...", "changes": [...] }'
-            });
-            return { isValid: false, errors, warnings };
-        }
-
-        // Check for required "changes" field
-        if (!rawInput.hasOwnProperty('changes')) {
-            errors.push({
-                type: 'missing_field',
-                field: 'changes',
-                message: 'Missing required "changes" field',
-                suggestion: 'Add a "changes" array to your JSON: { "changes": [...] }'
-            });
-            return { isValid: false, errors, warnings };
-        }
-
-        // Validate changes is an array
-        if (!Array.isArray(rawInput.changes)) {
-            errors.push({
-                type: 'invalid_type',
-                field: 'changes',
-                message: '"changes" must be an array',
-                suggestion: 'Use square brackets for the changes field: "changes": [...]'
-            });
-            return { isValid: false, errors, warnings };
-        }
-
-        // Check for empty changes array
-        if (rawInput.changes.length === 0) {
-            errors.push({
-                type: 'empty_array',
-                field: 'changes',
-                message: 'Changes array cannot be empty',
-                suggestion: 'Add at least one change object to the array'
-            });
-            return { isValid: false, errors, warnings };
-        }
-
-        // Warn about missing description
-        if (!rawInput.description || rawInput.description.trim() === '') {
-            warnings.push({
-                type: 'missing_description',
-                field: 'description',
-                message: 'No description provided for this change set',
-                suggestion: 'Add a "description" field to explain what these changes do'
-            });
         }
 
         // Warn about large number of changes
-        if (rawInput.changes.length > this.MAX_REASONABLE_CHANGES) {
+        if (changeMatches.length > this.MAX_REASONABLE_CHANGES) {
             warnings.push({
                 type: 'large_change_count',
-                message: `Large number of changes (${rawInput.changes.length}). Consider splitting into smaller batches`,
+                message: `Large number of changes (${changeMatches.length}). Consider splitting into smaller batches`,
                 suggestion: 'Break large change sets into multiple smaller operations for easier review'
             });
         }
 
-        // Validate individual change objects structure
-        for (let i = 0; i < rawInput.changes.length; i++) {
-            const changeErrors = this.validateChangeStructure(rawInput.changes[i], i);
-            errors.push(...changeErrors.errors);
-            warnings.push(...changeErrors.warnings);
-        }
+        // Try to parse each block for basic structure validation
+        const blocks = this.splitIntoChangeBlocks(inputContent);
+        blocks.forEach((block, index) => {
+            const blockErrors = this.validateChangeBlockStructure(block, index);
+            errors.push(...blockErrors.errors);
+            warnings.push(...blockErrors.warnings);
+        });
 
         return {
             isValid: errors.length === 0,
@@ -222,147 +179,248 @@ export class ChangeParser {
     }
 
     /**
-     * Validate individual change object structure
+     * Validate a single change block structure
      */
-    private static validateChangeStructure(change: any, index: number): ValidationResult {
+    private static validateChangeBlockStructure(block: string, blockIndex: number): ValidationResult {
         const errors: ValidationError[] = [];
         const warnings: ValidationWarning[] = [];
 
-        if (!change || typeof change !== 'object' || Array.isArray(change)) {
+        // Check for required CHANGE line
+        if (!this.CHANGE_PATTERN.test(block)) {
             errors.push({
-                type: 'invalid_type',
-                changeIndex: index,
-                message: `Change ${index + 1} must be an object`,
-                suggestion: 'Use curly braces for change objects: {"file": "...", "action": "...", ...}'
-            });
-            return { isValid: false, errors, warnings };
-        }
-
-        // Required fields validation
-        const requiredFields = ['file', 'action', 'target', 'code'];
-        for (const field of requiredFields) {
-            if (!change.hasOwnProperty(field)) {
-                errors.push({
-                    type: 'missing_field',
-                    changeIndex: index,
-                    field: field,
-                    message: `Change ${index + 1}: Missing required field "${field}"`,
-                    suggestion: `Add the "${field}" field to change ${index + 1}`
-                });
-                continue;
-            }
-
-            if (change[field] === null || change[field] === undefined) {
-                errors.push({
-                    type: 'missing_field',
-                    changeIndex: index,
-                    field: field,
-                    message: `Change ${index + 1}: Field "${field}" cannot be null or undefined`,
-                    suggestion: `Provide a valid value for "${field}" in change ${index + 1}`
-                });
-                continue;
-            }
-
-            if (typeof change[field] !== 'string') {
-                errors.push({
-                    type: 'invalid_type',
-                    changeIndex: index,
-                    field: field,
-                    message: `Change ${index + 1}: Field "${field}" must be a string`,
-                    suggestion: `Wrap the ${field} value in quotes`
-                });
-                continue;
-            }
-
-            // Check for empty strings in critical fields
-            if (change[field].trim() === '' && field !== 'code') {
-                errors.push({
-                    type: 'missing_field',
-                    changeIndex: index,
-                    field: field,
-                    message: `Change ${index + 1}: Field "${field}" cannot be empty`,
-                    suggestion: `Provide a meaningful value for "${field}"`
-                });
-            }
-        }
-
-        // Validate action type
-        if (change.action && !this.VALID_ACTIONS.includes(change.action)) {
-            const suggestion = this.suggestSimilarAction(change.action);
-            errors.push({
-                type: 'invalid_action',
-                changeIndex: index,
-                field: 'action',
-                message: `Change ${index + 1}: Invalid action "${change.action}"`,
-                details: { validActions: this.VALID_ACTIONS },
-                suggestion: suggestion ? `Did you mean "${suggestion}"?` : `Valid actions: ${this.VALID_ACTIONS.join(', ')}`
+                type: 'missing_field',
+                changeIndex: blockIndex,
+                field: 'CHANGE',
+                message: `Block ${blockIndex + 1}: Missing CHANGE line`,
+                suggestion: 'Start each change block with "CHANGE: description"'
             });
         }
 
-        // Validate optional fields
-        if (change.class !== undefined && typeof change.class !== 'string') {
+        // Check for required FILE line
+        if (!this.FILE_PATTERN.test(block)) {
             errors.push({
-                type: 'invalid_type',
-                changeIndex: index,
-                field: 'class',
-                message: `Change ${index + 1}: Field "class" must be a string if provided`,
-                suggestion: 'Remove the class field or provide a valid string value'
+                type: 'missing_field',
+                changeIndex: blockIndex,
+                field: 'FILE',
+                message: `Block ${blockIndex + 1}: Missing FILE line`,
+                suggestion: 'Add "FILE: path/to/file.ext" line'
             });
         }
 
-        // Method-specific validation
-        if (change.action === 'replace_method' || change.action === 'add_method') {
-            if (!change.class || change.class.trim() === '') {
-                errors.push({
-                    type: 'missing_field',
-                    changeIndex: index,
-                    field: 'class',
-                    message: `Change ${index + 1}: "${change.action}" requires a "class" field`,
-                    suggestion: 'Specify which class the method belongs to'
-                });
-            }
+        // Check for required ACTION line
+        if (!this.ACTION_PATTERN.test(block)) {
+            errors.push({
+                type: 'missing_field',
+                changeIndex: blockIndex,
+                field: 'ACTION',
+                message: `Block ${blockIndex + 1}: Missing ACTION line`,
+                suggestion: 'Add "ACTION: action_type" line'
+            });
         }
 
-        // Create file specific validation
-        if (change.action === 'create_file') {
-            if (!change.code || change.code.trim() === '') {
+        // Check for code delimiters
+        const codeDelimiters = block.match(/^---\s*$/gm);
+        if (!codeDelimiters || codeDelimiters.length < 2) {
+            // Not all actions require code (e.g., delete_function)
+            const actionMatch = block.match(this.ACTION_PATTERN);
+            const action = actionMatch ? actionMatch[1].trim() : '';
+            
+            if (action !== 'delete_function') {
                 errors.push({
                     type: 'missing_field',
-                    changeIndex: index,
+                    changeIndex: blockIndex,
                     field: 'code',
-                    message: `Change ${index + 1}: "create_file" requires non-empty "code" field with file content`,
-                    suggestion: 'Provide the complete file content in the "code" field'
+                    message: `Block ${blockIndex + 1}: Missing code block or incorrect --- delimiters`,
+                    suggestion: 'Wrap code in --- markers: ---\\ncode here\\n---'
                 });
+            }
+        }
+
+        // Validate action if present
+        const actionMatch = block.match(this.ACTION_PATTERN);
+        if (actionMatch) {
+            const action = actionMatch[1].trim();
+            if (!this.VALID_ACTIONS.includes(action as ChangeAction)) {
+                const suggestion = this.suggestSimilarAction(action);
+                errors.push({
+                    type: 'invalid_action',
+                    changeIndex: blockIndex,
+                    field: 'ACTION',
+                    message: `Block ${blockIndex + 1}: Invalid action "${action}"`,
+                    suggestion: suggestion ? `Did you mean "${suggestion}"?` : `Valid actions: ${this.VALID_ACTIONS.join(', ')}`
+                });
+            }
+        }
+
+        return { isValid: errors.length === 0, errors, warnings };
+    }
+
+    /**
+     * Extract global description from the top of the input
+     */
+    private static extractGlobalDescription(inputContent: string): string | undefined {
+        const lines = inputContent.split('\n');
+        const descriptionLines: string[] = [];
+        
+        for (const line of lines) {
+            const trimmedLine = line.trim();
+            
+            // Stop at first CHANGE block
+            if (this.CHANGE_PATTERN.test(line)) {
+                break;
             }
             
-            // For create_file, target should be the filename or description
-            if (!change.target || change.target.trim() === '') {
-                warnings.push({
-                    type: 'missing_description',
-                    changeIndex: index,
-                    field: 'target',
-                    message: `Change ${index + 1}: "create_file" should specify filename or description in "target"`,
-                    suggestion: 'Use "target" to specify the new filename or provide a description'
-                });
+            // Skip empty lines and comments
+            if (trimmedLine && !trimmedLine.startsWith('//') && !trimmedLine.startsWith('#')) {
+                descriptionLines.push(trimmedLine);
+            }
+        }
+        
+        const description = descriptionLines.join(' ').trim();
+        return description || undefined;
+    }
+
+    /**
+     * Split input into individual change blocks
+     */
+    private static splitIntoChangeBlocks(inputContent: string): string[] {
+        const blocks: string[] = [];
+        const lines = inputContent.split('\n');
+        let currentBlock: string[] = [];
+        let inBlock = false;
+
+        for (const line of lines) {
+            if (this.CHANGE_PATTERN.test(line)) {
+                // Save previous block if it exists
+                if (inBlock && currentBlock.length > 0) {
+                    blocks.push(currentBlock.join('\n').trim());
+                }
+                // Start new block
+                currentBlock = [line];
+                inBlock = true;
+            } else if (inBlock) {
+                currentBlock.push(line);
             }
         }
 
-        // Warnings
-        if (change.code && change.code.length > this.MAX_CODE_LENGTH) {
-            warnings.push({
-                type: 'long_code_block',
-                changeIndex: index,
-                field: 'code',
-                message: `Change ${index + 1}: Very long code block (${change.code.length} characters)`,
-                suggestion: 'Consider breaking large code changes into smaller pieces'
-            });
+        // Add final block
+        if (inBlock && currentBlock.length > 0) {
+            blocks.push(currentBlock.join('\n').trim());
         }
 
+        return blocks;
+    }
+
+    /**
+     * Parse a single change block
+     */
+    private static parseChangeBlock(block: string, blockIndex: number): ParsedChange {
+        // Extract required fields
+        const descriptionMatch = block.match(this.CHANGE_PATTERN);
+        const fileMatch = block.match(this.FILE_PATTERN);
+        const actionMatch = block.match(this.ACTION_PATTERN);
+
+        if (!descriptionMatch || !fileMatch || !actionMatch) {
+            throw new Error(`Block ${blockIndex + 1}: Missing required fields`);
+        }
+
+        const description = descriptionMatch[1].trim();
+        const file = fileMatch[1].trim();
+        const action = actionMatch[1].trim() as ChangeAction;
+
+        // Extract optional fields
+        const targetMatch = block.match(this.TARGET_PATTERN);
+        const classMatch = block.match(this.CLASS_PATTERN);
+        
+        let target = targetMatch ? targetMatch[1].trim() : '';
+        const classValue = classMatch ? classMatch[1].trim() : undefined;
+
+        // For actions that don't typically need a target, use description as target
+        if (!target && !this.actionNeedsTarget(action)) {
+            target = description;
+        }
+
+        // Extract code block
+        const code = this.extractCodeBlock(block);
+
+        // Validate action-specific requirements
+        this.validateActionRequirements(action, target, classValue, code, blockIndex);
+
         return {
-            isValid: errors.length === 0,
-            errors,
-            warnings
+            file,
+            action,
+            target,
+            code,
+            class: classValue,
+            description
         };
+    }
+
+    /**
+     * Extract code between --- markers
+     */
+    private static extractCodeBlock(block: string): string {
+        const lines = block.split('\n');
+        const delimiterIndices: number[] = [];
+        
+        // Find all --- markers
+        lines.forEach((line, index) => {
+            if (this.CODE_DELIMITER.test(line)) {
+                delimiterIndices.push(index);
+            }
+        });
+
+        if (delimiterIndices.length < 2) {
+            return ''; // No code block found
+        }
+
+        // Extract code between first two --- markers
+        const startIndex = delimiterIndices[0] + 1;
+        const endIndex = delimiterIndices[1];
+        
+        return lines.slice(startIndex, endIndex).join('\n').trim();
+    }
+
+    /**
+     * Check if action typically needs a target
+     */
+    private static actionNeedsTarget(action: ChangeAction): boolean {
+        const needsTarget = [
+            'replace_function', 'replace_method', 'delete_function',
+            'insert_after', 'insert_before', 'replace_block'
+        ];
+        return needsTarget.includes(action);
+    }
+
+    /**
+     * Validate action-specific requirements
+     */
+    private static validateActionRequirements(
+        action: ChangeAction, 
+        target: string, 
+        classValue: string | undefined, 
+        code: string, 
+        blockIndex: number
+    ): void {
+        // Method operations require class
+        if ((action === 'replace_method' || action === 'add_method') && !classValue) {
+            throw new Error(`Block ${blockIndex + 1}: Action "${action}" requires a CLASS field`);
+        }
+
+        // Most actions require code (except delete operations)
+        if (!code && action !== 'delete_function') {
+            throw new Error(`Block ${blockIndex + 1}: Action "${action}" requires a code block`);
+        }
+
+        // Actions that need targets
+        if (this.actionNeedsTarget(action) && !target) {
+            throw new Error(`Block ${blockIndex + 1}: Action "${action}" requires a TARGET field`);
+        }
+
+        // Validate code length
+        if (code && code.length > this.MAX_CODE_LENGTH) {
+            throw new Error(`Block ${blockIndex + 1}: Code block is too large (${code.length} characters). Maximum: ${this.MAX_CODE_LENGTH}`);
+        }
     }
 
     /**
@@ -380,7 +438,9 @@ export class ChangeParser {
             'remove_function': 'delete_function',
             'modify': 'modify_line',
             'change_line': 'modify_line',
-            'insert': 'insert_after'
+            'insert': 'insert_after',
+            'new_file': 'create_file',
+            'make_file': 'create_file'
         };
 
         const lowerInvalid = invalidAction.toLowerCase();
@@ -406,7 +466,7 @@ export class ChangeParser {
     }
 
     /**
-     * Simple string similarity calculation
+     * Calculate string similarity using Levenshtein distance
      */
     private static calculateSimilarity(a: string, b: string): number {
         const longer = a.length > b.length ? a : b;
@@ -439,20 +499,6 @@ export class ChangeParser {
         }
 
         return matrix[b.length][a.length];
-    }
-
-    /**
-     * Parse individual change object (assumes structure is already validated)
-     */
-    private static parseChange(change: any, _index: number): ParsedChange {
-        return {
-            file: change.file.trim(),
-            action: change.action as ChangeAction,
-            target: change.target.trim(),
-            code: change.code,
-            class: change.class?.trim(),
-            description: change.description?.trim()
-        };
     }
 
     /**
@@ -501,7 +547,7 @@ export class ChangeParser {
     }
 
     /**
-     * Validate file accessibility (moved from old implementation)
+     * Validate file accessibility
      */
     public static async validateFileAccess(filePath: string, workspace: vscode.WorkspaceFolder, action: ChangeAction): Promise<FileValidationResult> {
         const errors: ValidationError[] = [];
@@ -519,7 +565,7 @@ export class ChangeParser {
                         await vscode.workspace.fs.readFile(fullPath);
                     } catch (readError) {
                         errors.push({
-                            type: 'json_parse',
+                            type: 'parse_error',
                             message: `File exists but cannot be read: ${filePath}`,
                             suggestion: 'Check file permissions'
                         });
@@ -545,7 +591,7 @@ export class ChangeParser {
                 } else {
                     // For all other actions, missing file is an error
                     errors.push({
-                        type: 'json_parse',
+                        type: 'parse_error',
                         message: `Target file does not exist: ${filePath}`,
                         suggestion: `Use "create_file" action if you want to create a new file, or verify the file path is correct`
                     });
@@ -554,7 +600,7 @@ export class ChangeParser {
 
         } catch (error) {
             errors.push({
-                type: 'json_parse',
+                type: 'parse_error',
                 message: `Cannot access file path: ${filePath}`,
                 suggestion: 'Check that the file path is valid for this workspace'
             });
@@ -614,11 +660,54 @@ export class ChangeParser {
 
         return preview;
     }
+
+    /**
+     * Generate example format for user guidance
+     * Delegates to the documentation module
+     */
+    public static generateExample(): string {
+        return FormatDocumentation.generateExample();
+    }
+
+    /**
+     * Get format documentation for help
+     * Delegates to the documentation module
+     */
+    public static getFormatDocumentation(): string {
+        return FormatDocumentation.getFormatDocumentation();
+    }
+
+    /**
+     * Get quick reference
+     * Delegates to the documentation module
+     */
+    public static getQuickReference(): string {
+        return FormatDocumentation.getQuickReference();
+    }
+
+    /**
+     * Get validation tips
+     * Delegates to the documentation module
+     */
+    public static getValidationTips(): string[] {
+        return FormatDocumentation.getValidationTips();
+    }
+
+    /**
+     * Get troubleshooting guide
+     * Delegates to the documentation module
+     */
+    public static getTroubleshootingGuide(): string {
+        return FormatDocumentation.getTroubleshootingGuide();
+    }
+
+    // Legacy compatibility method name
+    public static validateJsonStructure = this.validateStructure;
 }
 
 /**
  * Helper function for backwards compatibility
  */
-export function parseChangeInput(jsonContent: string): ParsedInput {
-    return ChangeParser.parseInput(jsonContent);
+export function parseChangeInput(inputContent: string): ParsedInput {
+    return ChangeParser.parseInput(inputContent);
 }

@@ -101,8 +101,8 @@ export class ValidationEngine {
 
             return {
                 overallValid: summary.invalidChanges === 0,
-                jsonErrors: [], // JSON errors handled in Phase 1
-                jsonWarnings: [], // JSON warnings handled in Phase 1
+                jsonErrors: [], // Structure errors handled in Phase 1
+                jsonWarnings: [], // Structure warnings handled in Phase 1
                 changeValidations,
                 summary,
                 suggestions: globalSuggestions
@@ -113,7 +113,7 @@ export class ValidationEngine {
             return {
                 overallValid: false,
                 jsonErrors: [{
-                    type: 'json_parse',
+                    type: 'parse_error',
                     message: `Validation engine failed: ${error}`,
                     suggestion: 'Try validating changes one at a time'
                 }],
@@ -164,7 +164,7 @@ export class ValidationEngine {
                     });
                 } else {
                     errors.push({
-                        type: 'json_parse',
+                        type: 'parse_error',
                         changeIndex: index,
                         field: 'file',
                         message: `Target file does not exist: ${change.file}`,
@@ -181,7 +181,7 @@ export class ValidationEngine {
                 
                 if (!targetValidation.exists) {
                     errors.push({
-                        type: 'json_parse',
+                        type: 'parse_error',
                         changeIndex: index,
                         field: 'target',
                         message: targetValidation.reason || `Target "${change.target}" not found`,
@@ -428,7 +428,7 @@ export class ValidationEngine {
      * Check if action creates new files
      */
     private static isNewFileAction(action: ChangeAction): boolean {
-        return ['add_function', 'add_method', 'add_struct', 'add_enum', 'add_import'].includes(action);
+        return ['add_function', 'add_method', 'add_struct', 'add_enum', 'add_import', 'create_file'].includes(action);
     }
 
     /**
@@ -451,7 +451,7 @@ export class ValidationEngine {
             change,
             isValid: false,
             errors: [{
-                type: 'json_parse',
+                type: 'parse_error',
                 changeIndex: index,
                 message: errorMessage,
                 suggestion: 'Check the change configuration and try again'

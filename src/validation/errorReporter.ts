@@ -9,7 +9,7 @@ export interface ErrorReport {
     suggestion?: string;
     code?: string;
     actionable: boolean;
-    category: 'json' | 'file' | 'target' | 'syntax' | 'logic' | 'performance';
+    category: 'format' | 'file' | 'target' | 'syntax' | 'logic' | 'performance';
 }
 
 export interface ValidationReport {
@@ -28,9 +28,9 @@ export class ErrorReporter {
     public static createValidationReport(validationSummary: ValidationSummary): ValidationReport {
         const reports: ErrorReport[] = [];
         
-        // Add JSON-level errors and warnings
-        reports.push(...this.formatJsonErrors(validationSummary.jsonErrors));
-        reports.push(...this.formatJsonWarnings(validationSummary.jsonWarnings));
+        // Add structure-level errors and warnings (was JSON-level)
+        reports.push(...this.formatStructureErrors(validationSummary.jsonErrors));
+        reports.push(...this.formatStructureWarnings(validationSummary.jsonWarnings));
         
         // Add change-level errors and warnings
         for (const changeValidation of validationSummary.changeValidations) {
@@ -56,9 +56,9 @@ export class ErrorReporter {
     }
 
     /**
-     * Format JSON parsing errors
+     * Format structure parsing errors (was formatJsonErrors)
      */
-    public static formatJsonErrors(errors: ValidationError[]): ErrorReport[] {
+    public static formatStructureErrors(errors: ValidationError[]): ErrorReport[] {
         return errors.map(error => {
             const baseReport: ErrorReport = {
                 severity: 'error',
@@ -66,15 +66,15 @@ export class ErrorReporter {
                 message: error.message,
                 suggestion: error.suggestion,
                 actionable: true,
-                category: 'json'
+                category: 'format'
             };
 
             switch (error.type) {
-                case 'json_parse':
+                case 'parse_error':
                     return {
                         ...baseReport,
-                        title: '🚫 JSON Parsing Error',
-                        code: 'JSON_PARSE_ERROR'
+                        title: '🚫 Format Parsing Error',
+                        code: 'PARSE_ERROR'
                     };
                     
                 case 'missing_field':
@@ -84,11 +84,11 @@ export class ErrorReporter {
                         code: 'MISSING_FIELD'
                     };
                     
-                case 'invalid_type':
+                case 'invalid_format':
                     return {
                         ...baseReport,
-                        title: `🔧 Invalid Field Type: ${error.field}`,
-                        code: 'INVALID_TYPE'
+                        title: `🔧 Invalid Format: ${error.field || 'Structure'}`,
+                        code: 'INVALID_FORMAT'
                     };
                     
                 case 'invalid_action':
@@ -96,13 +96,6 @@ export class ErrorReporter {
                         ...baseReport,
                         title: '⚡ Invalid Action Type',
                         code: 'INVALID_ACTION'
-                    };
-                    
-                case 'empty_array':
-                    return {
-                        ...baseReport,
-                        title: '📋 Empty Changes Array',
-                        code: 'EMPTY_CHANGES'
                     };
                     
                 case 'duplicate_change':
@@ -120,9 +113,9 @@ export class ErrorReporter {
     }
 
     /**
-     * Format JSON parsing warnings
+     * Format structure parsing warnings (was formatJsonWarnings)
      */
-    public static formatJsonWarnings(warnings: ValidationWarning[]): ErrorReport[] {
+    public static formatStructureWarnings(warnings: ValidationWarning[]): ErrorReport[] {
         return warnings.map(warning => {
             const baseReport: ErrorReport = {
                 severity: 'warning',
@@ -130,7 +123,7 @@ export class ErrorReporter {
                 message: warning.message,
                 suggestion: warning.suggestion,
                 actionable: false,
-                category: 'json'
+                category: 'format'
             };
 
             switch (warning.type) {
@@ -164,6 +157,14 @@ export class ErrorReporter {
                         title: '📝 Long Code Block',
                         code: 'LONG_CODE_BLOCK',
                         category: 'performance'
+                    };
+                    
+                case 'missing_target':
+                    return {
+                        ...baseReport,
+                        title: '🎯 Missing Target',
+                        code: 'MISSING_TARGET',
+                        actionable: true
                     };
                     
                 default:
@@ -354,10 +355,11 @@ export class ErrorReporter {
     private static categorizeError(error: ValidationError, _changeValidation: ChangeValidationResult): ErrorReport['category'] {
         if (error.field === 'file') return 'file';
         if (error.field === 'target') return 'target';
-        if (error.type === 'json_parse') return 'json';
+        if (error.type === 'parse_error') return 'format';
         if (error.type === 'invalid_action') return 'syntax';
         if (error.type === 'duplicate_change') return 'logic';
-        return 'json';
+        if (error.type === 'invalid_format') return 'format';
+        return 'format';
     }
 
     /**
@@ -367,7 +369,8 @@ export class ErrorReporter {
         if (warning.type === 'long_code_block') return 'performance';
         if (warning.type === 'large_change_count') return 'performance';
         if (warning.type === 'duplicate_target') return 'logic';
-        return 'json';
+        if (warning.type === 'missing_target') return 'syntax';
+        return 'format';
     }
 
     /**
@@ -375,11 +378,10 @@ export class ErrorReporter {
      */
     private static getErrorTitle(error: ValidationError): string {
         const titles: { [key: string]: string } = {
-            'json_parse': 'JSON Parsing Error',
+            'parse_error': 'Format Parsing Error',
             'missing_field': 'Missing Required Field',
-            'invalid_type': 'Invalid Field Type',
+            'invalid_format': 'Invalid Format',
             'invalid_action': 'Invalid Action Type',
-            'empty_array': 'Empty Changes Array',
             'duplicate_change': 'Duplicate Change'
         };
         
@@ -394,7 +396,8 @@ export class ErrorReporter {
             'missing_description': 'Missing Description',
             'large_change_count': 'Large Change Set',
             'duplicate_target': 'Duplicate Target',
-            'long_code_block': 'Long Code Block'
+            'long_code_block': 'Long Code Block',
+            'missing_target': 'Missing Target'
         };
         
         return titles[warning.type] || 'Validation Warning';
@@ -493,7 +496,7 @@ export class ErrorReporter {
                     title: '❌ Validation Error',
                     message: 'An unknown validation error occurred',
                     actionable: false,
-                    category: 'json'
+                    category: 'format'
                 };
         }
     }

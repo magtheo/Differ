@@ -95,6 +95,14 @@ export class DifferProvider implements vscode.WebviewViewProvider {
                 await this._handleParseInput(message.data);
                 break;
                 
+            case 'showExample':
+                await this._handleShowExample();
+                break;
+                
+            case 'showHelp':
+                await this._handleShowHelp();
+                break;
+                
             case 'applyChanges':
                 await this._handleApplyChanges(message.data);
                 break;
@@ -134,11 +142,11 @@ export class DifferProvider implements vscode.WebviewViewProvider {
         }
     }
     
-    private async _handleParseInput(inputData: { jsonInput: string }) {
-        this._logger.info('Starting to parse input', { inputLength: inputData.jsonInput?.length });
+    private async _handleParseInput(inputData: { input: string }) {
+        this._logger.info('Starting to parse comment-based input', { inputLength: inputData.input?.length });
         
-        // Add this line to prevent input from being cleared
-        this._stateManager.setJsonInput(inputData.jsonInput);
+        // Store input to prevent it from being cleared
+        this._stateManager.setJsonInput(inputData.input);
 
         // Clear previous state and start loading
         this._stateManager.setLoading(true);
@@ -148,21 +156,21 @@ export class DifferProvider implements vscode.WebviewViewProvider {
         
         try {
             // Validate input is not empty
-            if (!inputData.jsonInput || inputData.jsonInput.trim() === '') {
+            if (!inputData.input || inputData.input.trim() === '') {
                 this._stateManager.setGlobalValidationErrors([{
-                    type: 'json_parse',
+                    type: 'parse_error',
                     message: 'Input cannot be empty',
-                    suggestion: 'Please paste valid JSON containing a "changes" array'
+                    suggestion: 'Please provide changes in the format: CHANGE: description\\nFILE: path\\nACTION: action_type\\n---\\ncode\\n---'
                 }]);
                 return;
             }
             
-            // Phase 1: JSON Structure Validation
-            this._logger.info('Phase 1: Validating JSON structure');
-            const structureValidation = ChangeParser.validateJsonStructure(inputData.jsonInput.trim());
+            // Phase 1: Structure Validation
+            this._logger.info('Phase 1: Validating comment-based structure');
+            const structureValidation = ChangeParser.validateStructure(inputData.input.trim());
             
             if (!structureValidation.isValid) {
-                this._logger.warn('JSON structure validation failed', { 
+                this._logger.warn('Comment-based structure validation failed', { 
                     errorCount: structureValidation.errors.length,
                     warningCount: structureValidation.warnings.length 
                 });
@@ -175,18 +183,18 @@ export class DifferProvider implements vscode.WebviewViewProvider {
                 return;
             }
             
-            // Phase 2: Parse the validated JSON
-            this._logger.info('Phase 2: Parsing validated JSON');
+            // Phase 2: Parse the validated input
+            this._logger.info('Phase 2: Parsing validated comment-based input');
             let parsedData: ParsedInput;
             try {
-                parsedData = ChangeParser.parseInput(inputData.jsonInput.trim());
+                parsedData = ChangeParser.parseInput(inputData.input.trim());
             } catch (parseError) {
                 // This shouldn't happen if validation passed, but just in case
                 const errorMessage = parseError instanceof Error ? parseError.message : String(parseError);
                 this._stateManager.setGlobalValidationErrors([{
-                    type: 'json_parse',
+                    type: 'parse_error',
                     message: `Unexpected parsing error: ${errorMessage}`,
-                    suggestion: 'Please check your JSON format'
+                    suggestion: 'Please check your input format and try again'
                 }]);
                 return;
             }
@@ -230,7 +238,7 @@ export class DifferProvider implements vscode.WebviewViewProvider {
             // Don't await this - let it run in background and update UI when complete
             this._performTargetValidation(parsedData);
             
-            this._logger.info('Successfully parsed input.', { 
+            this._logger.info('Successfully parsed comment-based input.', { 
                 changeCount: pendingChanges.length,
                 description: parsedData.description,
                 warningCount: structureValidation.warnings.length + semanticValidation.warnings.length
@@ -238,17 +246,51 @@ export class DifferProvider implements vscode.WebviewViewProvider {
             
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : `Unknown error: ${String(error)}`;
-            this._logger.error('Failed to parse input', { error: errorMessage, originalError: error });
+            this._logger.error('Failed to parse comment-based input', { error: errorMessage, originalError: error });
             
             this._stateManager.setGlobalValidationErrors([{
-                type: 'json_parse',
+                type: 'parse_error',
                 message: `Parsing failed: ${errorMessage}`,
-                suggestion: 'Check your JSON format and try again'
+                suggestion: 'Check your input format and try again'
             }]);
             
         } finally {
             this._stateManager.setLoading(false);
         }
+    }
+    
+    private async _handleShowExample() {
+        this._logger.info('Showing example format');
+        
+        const example = ChangeParser.generateExample();
+        
+        // Show example in a new document
+        const doc = await vscode.workspace.openTextDocument({
+            content: example,
+            language: 'plaintext'
+        });
+        
+        await vscode.window.showTextDocument(doc, {
+            preview: true,
+            viewColumn: vscode.ViewColumn.Beside
+        });
+    }
+    
+    private async _handleShowHelp() {
+        this._logger.info('Showing format documentation');
+        
+        const documentation = ChangeParser.getFormatDocumentation();
+        
+        // Show documentation in a new document  
+        const doc = await vscode.workspace.openTextDocument({
+            content: documentation,
+            language: 'markdown'
+        });
+        
+        await vscode.window.showTextDocument(doc, {
+            preview: true,
+            viewColumn: vscode.ViewColumn.Beside
+        });
     }
     
     private async _handleApplyChanges(data: { selectedChanges: string[] }) {
@@ -267,7 +309,7 @@ export class DifferProvider implements vscode.WebviewViewProvider {
             if (!originalParsedInput) {
                 this._logger.error("Cannot apply changes, parsedInput is missing from state.");
                 this._stateManager.setGlobalValidationErrors([{
-                    type: 'json_parse',
+                    type: 'parse_error',
                     message: `Internal error: Parsed input is missing. Please parse again.`,
                 }]);
                 return;
@@ -282,7 +324,7 @@ export class DifferProvider implements vscode.WebviewViewProvider {
                 });
                 
                 this._stateManager.setGlobalValidationErrors([{
-                    type: 'invalid_type',
+                    type: 'invalid_format',
                     message: `Cannot apply ${invalidChanges.length} invalid changes. Fix validation errors first.`,
                     suggestion: 'Use "Select Only Valid" to select only changes without errors'
                 }]);
@@ -317,7 +359,7 @@ export class DifferProvider implements vscode.WebviewViewProvider {
             this._logger.error('Failed to apply changes via command', { error: errorMessage, originalError: error });
             
             this._stateManager.setGlobalValidationErrors([{
-                type: 'json_parse', // Using existing type
+                type: 'parse_error',
                 message: `Apply failed: ${errorMessage}`,
                 suggestion: 'Check the VS Code output panel for more details'
             }]);
@@ -339,7 +381,7 @@ export class DifferProvider implements vscode.WebviewViewProvider {
         if (!change) {
             this._logger.warn('Preview requested for non-existent change ID', { changeId: data.changeId });
             this._stateManager.setGlobalValidationErrors([{
-                type: 'json_parse',
+                type: 'parse_error',
                 message: `Cannot preview change: ID ${data.changeId} not found`,
                 suggestion: 'Try refreshing the changes list'
             }]);
@@ -350,7 +392,7 @@ export class DifferProvider implements vscode.WebviewViewProvider {
             const workspaceFolders = vscode.workspace.workspaceFolders;
             if (!workspaceFolders || workspaceFolders.length === 0) {
                 this._stateManager.setGlobalValidationErrors([{
-                    type: 'json_parse',
+                    type: 'parse_error',
                     message: 'No workspace folder open to preview changes',
                     suggestion: 'Open a workspace folder first'
                 }]);
@@ -374,7 +416,7 @@ export class DifferProvider implements vscode.WebviewViewProvider {
                 this._logger.error(`Failed to open original file for preview: ${targetFileUri.fsPath}`, e);
                 
                 this._stateManager.setChangeValidationErrors(change.id, [{
-                    type: 'json_parse',
+                    type: 'parse_error',
                     message: `File not found: ${change.file}`,
                     suggestion: 'Use "create_file" action to create new files, or check that the file path is correct',
                     details: e.message
@@ -390,7 +432,7 @@ export class DifferProvider implements vscode.WebviewViewProvider {
             this._logger.error('Failed to generate preview', { error: errorMessage, originalError: error, changeId: data.changeId });
             
             this._stateManager.setChangeValidationErrors(data.changeId, [{
-                type: 'json_parse',
+                type: 'parse_error',
                 message: `Preview failed: ${errorMessage}`,
                 suggestion: 'Check the file path and try again'
             }]);
@@ -549,15 +591,15 @@ export class DifferProvider implements vscode.WebviewViewProvider {
         
         if (!currentInput) {
             this._stateManager.setGlobalValidationErrors([{
-                type: 'json_parse',
+                type: 'parse_error',
                 message: 'No input to validate',
-                suggestion: 'Enter JSON input first'
+                suggestion: 'Enter input first'
             }]);
             return;
         }
         
         // Re-run the parsing with current input
-        await this._handleParseInput({ jsonInput: currentInput });
+        await this._handleParseInput({ input: currentInput });
     }
 
     /**
@@ -574,7 +616,6 @@ export class DifferProvider implements vscode.WebviewViewProvider {
             this._stateManager.setValidationInProgress(true);
             this._logger.info('Starting target existence validation');
 
-            // Updated to pass action parameter for each change
             const fileValidations = await Promise.all(
                 parsedInput.changes.map(async (change, index) => ({
                     changeIndex: index,
@@ -621,7 +662,7 @@ export class DifferProvider implements vscode.WebviewViewProvider {
         } catch (error) {
             this._logger.error('Target validation failed', { error });
             this._stateManager.setGlobalValidationErrors([{
-                type: 'json_parse',
+                type: 'parse_error',
                 message: `Target validation failed: ${error}`,
                 suggestion: 'Try validating individual changes or check workspace configuration'
             }]);
@@ -639,9 +680,9 @@ export class DifferProvider implements vscode.WebviewViewProvider {
         const parsedInput = this._stateManager.getState().parsedInput;
         if (!parsedInput) {
             this._stateManager.setGlobalValidationErrors([{
-                type: 'json_parse',
+                type: 'parse_error',
                 message: 'No parsed input available for target validation',
-                suggestion: 'Parse JSON input first'
+                suggestion: 'Parse input first'
             }]);
             return;
         }
@@ -700,23 +741,30 @@ export class DifferProvider implements vscode.WebviewViewProvider {
                 img-src ${webview.cspSource} data: https:; 
             ">
             <link href="${styleUri}" rel="stylesheet">
-            <title>LLM Code Patcher</title>
+            <title>Differ - Code Patcher</title>
         </head>
         <body>
             <div id="app">
                 <!-- Input Section -->
                 <div class="section">
-                    <h3>Input JSON Changes</h3>
+                    <h3>📝 Input Changes</h3>
                     <div class="input-container">
+                        <div class="format-info">
+                            <p>Use the comment-based format below. Each change starts with <code>CHANGE:</code></p>
+                            <div class="format-buttons">
+                                <button id="showExampleBtn" class="secondary">📖 Show Example</button>
+                                <button id="showHelpBtn" class="secondary">❓ Format Help</button>
+                            </div>
+                        </div>
                         <textarea 
-                            id="jsonInput" 
-                            placeholder="Paste LLM-generated JSON changes here..."
-                            rows="8"
-                            aria-label="JSON input for code changes"
+                            id="inputTextarea" 
+                            placeholder="CHANGE: Add user authentication&#10;FILE: src/auth/auth.ts&#10;ACTION: create_file&#10;---&#10;export function authenticate(token: string) {&#10;  return validateToken(token);&#10;}&#10;---&#10;&#10;CHANGE: Add import statement&#10;FILE: src/app.ts&#10;ACTION: add_import&#10;---&#10;import { authenticate } from './auth/auth';&#10;---"
+                            rows="12"
+                            aria-label="Change input in comment format"
                         ></textarea>
                         <div class="input-buttons">
-                            <button id="parseBtn" class="primary" disabled>Parse Changes</button>
-                            <button id="clearInputBtn" class="secondary">Clear Input</button>
+                            <button id="parseBtn" class="primary" disabled>🚀 Parse Changes</button>
+                            <button id="clearInputBtn" class="secondary">🗑️ Clear Input</button>
                         </div>
                     </div>
                 </div>
@@ -725,21 +773,21 @@ export class DifferProvider implements vscode.WebviewViewProvider {
                 <div id="statusSection" class="section hidden">
                     <div id="loadingIndicator" class="hidden">
                         <div class="spinner" role="status" aria-label="Loading"></div>
-                        <span>Processing...</span>
+                        <span>Processing changes...</span>
                     </div>
                     
                     <!-- Global Validation Errors -->
                     <div id="globalErrors" class="validation-errors hidden">
-                        <h4>Validation Errors</h4>
+                        <h4>❌ Input Errors</h4>
                         <div id="globalErrorsList" class="error-list"></div>
                         <div class="error-actions">
-                            <button id="retryValidationBtn" class="secondary">Retry Validation</button>
+                            <button id="retryValidationBtn" class="secondary">🔄 Retry Validation</button>
                         </div>
                     </div>
                     
                     <!-- Global Validation Warnings -->
                     <div id="globalWarnings" class="validation-warnings hidden">
-                        <h4>Validation Warnings</h4>
+                        <h4>⚠️ Input Warnings</h4>
                         <div id="globalWarningsList" class="warning-list"></div>
                     </div>
                     
@@ -749,7 +797,7 @@ export class DifferProvider implements vscode.WebviewViewProvider {
                 
                 <!-- Pending Changes Section -->
                 <div id="changesSection" class="section hidden">
-                    <h3>Pending Changes</h3>
+                    <h3>🔧 Pending Changes</h3>
                     <div class="changes-header">
                         <div class="changes-info">
                             <span id="changesCount">0 changes</span>
@@ -757,24 +805,50 @@ export class DifferProvider implements vscode.WebviewViewProvider {
                             <span id="validationSummary" class="validation-summary"></span>
                         </div>
                         <div class="changes-buttons">
-                            <button id="applySelectedBtn" class="primary" disabled>Apply Selected</button>
-                            <button id="selectOnlyValidBtn" class="secondary" disabled>Select Only Valid</button>
-                            <button id="validateTargetsBtn" class="secondary" disabled>Validate Targets</button>
-                            <button id="clearChangesBtn" class="secondary">Clear All Changes</button>
+                            <button id="applySelectedBtn" class="primary" disabled>✅ Apply Selected</button>
+                            <button id="selectOnlyValidBtn" class="secondary" disabled>✨ Select Only Valid</button>
+                            <button id="validateTargetsBtn" class="secondary" disabled>🔍 Validate Targets</button>
+                            <button id="clearChangesBtn" class="secondary">🗑️ Clear All Changes</button>
                         </div>
                     </div>
                     <div id="changesList" class="changes-list" aria-live="polite"></div>
                 </div>
                 
+                <!-- Quick Start Section -->
+                <div class="section">
+                    <h3>🚀 Quick Start</h3>
+                    <div class="quick-start-content">
+                        <div class="quick-start-item">
+                            <h4>1. Format Your Changes</h4>
+                            <p>Use the comment-based format above. Each change starts with <code>CHANGE:</code> followed by <code>FILE:</code>, <code>ACTION:</code>, and code between <code>---</code> markers.</p>
+                        </div>
+                        <div class="quick-start-item">
+                            <h4>2. Available Actions</h4>
+                            <div class="action-grid">
+                                <span class="action-tag">create_file</span>
+                                <span class="action-tag">add_function</span>
+                                <span class="action-tag">replace_function</span>
+                                <span class="action-tag">add_import</span>
+                                <span class="action-tag">add_method</span>
+                                <span class="action-tag">replace_method</span>
+                            </div>
+                        </div>
+                        <div class="quick-start-item">
+                            <h4>3. Get Help</h4>
+                            <p>Click "Show Example" or "Format Help" above for detailed guidance and examples.</p>
+                        </div>
+                    </div>
+                </div>
+                
                 <!-- History Section (Placeholder) -->
                 <div class="section">
-                    <h3>Change History</h3>
+                    <h3>📋 Change History</h3>
                     <div class="history-buttons">
-                        <button id="showHistoryBtn" class="secondary" disabled>Show History (WIP)</button>
-                        <button id="undoLastBtn" class="secondary" disabled>Undo Last (WIP)</button>
+                        <button id="showHistoryBtn" class="secondary" disabled>📜 Show History (Coming Soon)</button>
+                        <button id="undoLastBtn" class="secondary" disabled>↶ Undo Last (Coming Soon)</button>
                     </div>
                     <div id="historyList" class="history-list">
-                        <p class="placeholder">Change history is not yet available.</p>
+                        <p class="placeholder">Change history feature is not yet available.</p>
                     </div>
                 </div>
             </div>
