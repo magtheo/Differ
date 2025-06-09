@@ -725,3 +725,114 @@ textarea:focus {
 #inputTextarea::-webkit-scrollbar-thumb:hover {
     background: var(--vscode-scrollbarSlider-hoverBackground);
 }
+
+/* Toolbar and Dropdown Styles */
+.webview-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 16px;
+    background-color: var(--vscode-editorGroupHeader-tabsBackground); /* Or another suitable background */
+    border-bottom: 1px solid var(--vscode-panel-border);
+    margin-bottom: 16px; /* Space before the first section */
+    position: sticky; /* Optional: make it stick to top on scroll */
+    top: 0;
+    z-index: 100;
+}
+
+.toolbar-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--vscode-editorGroupHeader-activeTabForeground); /* Or panelTitle-activeForeground */
+}
+
+.toolbar-actions {
+    position: relative; /* For dropdown positioning */
+}
+
+#helpDropdownTriggerBtn {
+    background: none;
+    border: none;
+    color: var(--vscode-icon-foreground);
+    padding: 6px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    border-radius: 4px;
+}
+
+#helpDropdownTriggerBtn:hover {
+    background-color: var(--vscode-toolbar-hoverBackground);
+}
+
+#helpDropdownTriggerBtn svg {
+    fill: currentColor;
+}
+
+.dropdown-menu {
+    position: absolute;
+    top: 100%; /* Position below the button */
+    right: 0;
+    background-color: var(--vscode-menu-background);
+    border: 1px solid var(--vscode-menu-border);
+    border-radius: 4px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    z-index: 101;
+    min-width: 200px;
+    padding: 4px 0;
+}
+
+.dropdown-menu.hidden {
+    display: none;
+}
+
+.dropdown-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: none;
+    padding: 8px 12px;
+    color: var(--vscode-menu-foreground);
+    cursor: pointer;
+    font-size: 13px;
+    white-space: nowrap;
+}
+
+.dropdown-item:hover {
+    background-color: var(--vscode-menu-selectionBackground);
+    color: var(--vscode-menu-selectionForeground);
+}
+
+/* Ensure the Quick Start section is hidden if it has the hidden class */
+#quickStartSection.hidden {
+    display: none;
+}
+
+/* Adjustments for the format-info if buttons are removed */
+.format-info {
+    /* If format-buttons div is removed or empty, existing margins might be fine */
+}
+.format-info p {
+    margin-bottom: 0; /* No buttons below it anymore within this div */
+}
+
+
+/* Adjust icon button style */
+button.icon-button {
+    background-color: transparent;
+    border: 1px solid transparent; /* Keep same size as other buttons */
+    padding: 6px; /* Adjust as needed for icon size */
+    min-width: auto;
+}
+button.icon-button:hover {
+    background-color: var(--vscode-toolbar-hoverBackground);
+}
+button.icon-button svg {
+    vertical-align: middle;
+}
+button.icon-button span {
+     /* Hide text if you only want icon, or style as needed */
+    margin-left: 4px;
+}

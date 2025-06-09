@@ -1,4 +1,5 @@
-console.log('=== WEBVIEW MAIN.JS STARTING (Comment-Based Format) ===');
+// src/webview/main.js
+console.log('=== WEBVIEW MAIN.JS STARTING (View Title Bar Actions Version) ===');
 console.log('Document ready state:', document.readyState);
 console.log('VS Code API available:', typeof acquireVsCodeApi);
 
@@ -7,7 +8,7 @@ const vscode = acquireVsCodeApi();
 
 // State management
 let currentState = {
-    jsonInput: '', // Keeping name for compatibility, but now contains comment format
+    jsonInput: '', // Contains comment format input
     parsedInput: null,
     pendingChanges: [],
     selectedChanges: [],
@@ -24,36 +25,35 @@ let elements = {};
 
 // Initialize when DOM is loaded
 document.addEventListener('DOMContentLoaded', function() {
-    console.log('DOM Content Loaded. Initializing comment-based format UI...');
+    console.log('DOM Content Loaded. Initializing UI for view title bar actions...');
     initializeElements();
     attachEventListeners();
-    updateUI();
-    console.log('Initialization complete. Ready for comment-based input.');
+    updateUI(); // This will ensure Quick Start respects its 'hidden' class
+    console.log('Initialization complete. Ready for view title bar actions.');
 });
 
 function initializeElements() {
-    console.log('Initializing DOM elements for comment-based format.');
+    console.log('Initializing DOM elements for view title bar actions.');
     elements = {
+        // Toolbar and Dropdown elements are REMOVED from here
+
+        // Input Section
         inputTextarea: document.getElementById('inputTextarea'),
         parseBtn: document.getElementById('parseBtn'),
         clearInputBtn: document.getElementById('clearInputBtn'),
-        showExampleBtn: document.getElementById('showExampleBtn'),
-        showHelpBtn: document.getElementById('showHelpBtn'),
         
+        // Status Section
         statusSection: document.getElementById('statusSection'),
         loadingIndicator: document.getElementById('loadingIndicator'),
-        
-        // Global validation elements
         globalErrors: document.getElementById('globalErrors'),
         globalErrorsList: document.getElementById('globalErrorsList'),
         globalWarnings: document.getElementById('globalWarnings'),
         globalWarningsList: document.getElementById('globalWarningsList'),
         retryValidationBtn: document.getElementById('retryValidationBtn'),
-        
-        // Legacy elements
         errorMessage: document.getElementById('errorMessage'),
         successMessage: document.getElementById('successMessage'),
         
+        // Changes Section
         changesSection: document.getElementById('changesSection'),
         changesCount: document.getElementById('changesCount'),
         selectedCount: document.getElementById('selectedCount'),
@@ -63,23 +63,27 @@ function initializeElements() {
         validateTargetsBtn: document.getElementById('validateTargetsBtn'),
         clearChangesBtn: document.getElementById('clearChangesBtn'),
         changesList: document.getElementById('changesList'),
+
+        // Quick Start Section
+        quickStartSection: document.getElementById('quickStartSection'),
         
+        // History Section
         showHistoryBtn: document.getElementById('showHistoryBtn'),
         undoLastBtn: document.getElementById('undoLastBtn'),
         historyList: document.getElementById('historyList')
     };
-    console.log('DOM elements initialized:', Object.keys(elements));
+    console.log('DOM elements initialized:', Object.keys(elements).filter(key => elements[key]).join(', '));
 }
 
 function attachEventListeners() {
-    console.log('Attaching event listeners for comment-based format.');
+    console.log('Attaching event listeners for view title bar actions.');
     
+    // Event listeners for HTML dropdown are REMOVED
+
     // Input section
     if (elements.inputTextarea) elements.inputTextarea.addEventListener('input', handleInputChange);
     if (elements.parseBtn) elements.parseBtn.addEventListener('click', handleParseInput);
     if (elements.clearInputBtn) elements.clearInputBtn.addEventListener('click', handleClearInput);
-    if (elements.showExampleBtn) elements.showExampleBtn.addEventListener('click', handleShowExample);
-    if (elements.showHelpBtn) elements.showHelpBtn.addEventListener('click', handleShowHelp);
     
     // Validation section
     if (elements.retryValidationBtn) elements.retryValidationBtn.addEventListener('click', handleRetryValidation);
@@ -96,15 +100,21 @@ function attachEventListeners() {
     
     // Listen for messages from extension
     window.addEventListener('message', handleExtensionMessage);
+    
+    // Global click listener for closing HTML dropdown is REMOVED
     console.log('Event listeners attached.');
 }
 
-// Event handlers
+// Event Handlers for Dropdown are REMOVED
+// handleToggleHelpDropdown, handleShowExample (webview version), handleShowHelp (webview version) are removed.
+// handleToggleQuickstart (webview version) is also removed; its logic is now in the message handler.
+
+
+// Input and Action Handlers (mostly unchanged, but no longer responsible for dropdown interactions)
 function handleInputChange(event) {
     currentState.jsonInput = event.target.value;
     const hasContent = currentState.jsonInput.trim().length > 0;
     
-    // Clear validation errors when input changes
     currentState.globalValidationErrors = [];
     currentState.globalValidationWarnings = [];
     currentState.error = null;
@@ -112,33 +122,19 @@ function handleInputChange(event) {
     if (elements.parseBtn) {
         elements.parseBtn.disabled = !hasContent || currentState.isLoading || currentState.validationInProgress;
     }
-    
-    // Update UI to reflect cleared validation state
     updateStatusSection();
-    
-    console.log(
-        'Input changed. Length:', currentState.jsonInput.length,
-        'HasContent:', hasContent,
-        'isLoading:', currentState.isLoading,
-        'Parse button disabled:', elements.parseBtn ? elements.parseBtn.disabled : 'N/A'
-    );
 }
 
 function handleParseInput() {
     const input = elements.inputTextarea ? elements.inputTextarea.value.trim() : '';
-    console.log('Parse button clicked. Input length:', input.length, 'isLoading:', currentState.isLoading);
-    
     if (!input || currentState.isLoading || currentState.validationInProgress) {
         console.warn('ParseInput handler: No input or currently processing. Aborting.');
         return;
     }
-    
-    console.log('Sending parseInput message with comment-based data:', input.substring(0, 100) + '...');
     sendMessage('parseInput', { input });
 }
 
 function handleClearInput() {
-    console.log('Clear input button clicked.');
     if (elements.inputTextarea) {
         elements.inputTextarea.value = '';
     }
@@ -150,49 +146,33 @@ function handleClearInput() {
     if (elements.parseBtn) {
         elements.parseBtn.disabled = true;
     }
-    
     sendMessage('clearInput');
     updateUI();
 }
 
-function handleShowExample() {
-    console.log('Show example button clicked.');
-    sendMessage('showExample');
-}
-
-function handleShowHelp() {
-    console.log('Show help button clicked.');
-    sendMessage('showHelp');
-}
-
 function handleRetryValidation() {
-    console.log('Retry validation button clicked.');
     if (!currentState.jsonInput.trim()) {
         console.warn('No input to retry validation with.');
         return;
     }
+    // The extension side will use the existing currentState.jsonInput for retrying
     sendMessage('retryValidation');
 }
 
 function handleApplySelected() {
     const selectedChanges = currentState.selectedChanges;
-    console.log('Apply selected button clicked. Selected changes count:', selectedChanges.length, 'isLoading:', currentState.isLoading);
-    
     if (selectedChanges.length === 0 || currentState.isLoading || currentState.validationInProgress) {
         console.warn('ApplySelected handler: No changes selected or currently processing. Aborting.');
         return;
     }
-    
     sendMessage('applyChanges', { selectedChanges });
 }
 
 function handleSelectOnlyValid() {
-    console.log('Select only valid button clicked.');
     sendMessage('selectOnlyValid');
 }
 
 function handleValidateTargets() {
-    console.log('Validate targets button clicked.');
     if (currentState.isLoading || currentState.validationInProgress) {
         console.warn('Validation already in progress, ignoring request.');
         return;
@@ -201,50 +181,48 @@ function handleValidateTargets() {
 }
 
 function handleClearChanges() {
-    console.log('Clear changes button clicked.');
     sendMessage('clearChanges');
 }
 
 function handleShowHistory() {
-    console.log('Show history button clicked.');
     alert('History feature coming soon!');
 }
 
 function handleUndoLast() {
-    console.log('Undo last button clicked.');
     alert('Undo feature coming soon!');
 }
 
 function handleChangeCheckboxChange(event) {
     const changeId = event.target.dataset.changeId;
     const selected = event.target.checked;
-    console.log('Checkbox change for ID:', changeId, 'Selected:', selected);
     sendMessage('toggleChangeSelection', { changeId, selected });
 }
 
 function handlePreviewChange(changeId) {
-    console.log('Preview button clicked for change ID:', changeId);
     sendMessage('previewChange', { changeId });
 }
 
 // Message handling
 function sendMessage(type, data = {}) {
-    console.log('Sending message to extension -> Type:', type, 'Data:', data);
+    console.log(`Sending message to extension -> Type: ${type}`, data);
     vscode.postMessage({ type, data });
 }
 
 function handleExtensionMessage(event) {
     const message = event.data;
-    console.log('Received message from extension <- Type:', message.type, 'Message keys:', Object.keys(message));
+    console.log(`Received message from extension <- Type: ${message.type}`);
     
     switch (message.type) {
         case 'stateUpdate':
-            console.log('State update received. Old state validation errors:', currentState.globalValidationErrors.length);
             currentState = { ...currentState, ...message.state };
-            console.log('New state after update. Validation errors:', currentState.globalValidationErrors.length, 'Pending changes:', currentState.pendingChanges.length);
             updateUI();
             break;
-            
+        case 'toggleQuickStart': // NEW message handler
+            if (elements.quickStartSection) {
+                elements.quickStartSection.classList.toggle('hidden');
+                console.log('Quick Start section visibility toggled by extension message.');
+            }
+            break;
         default:
             console.warn('Unknown message type received from extension:', message.type);
     }
@@ -252,176 +230,115 @@ function handleExtensionMessage(event) {
 
 // UI updates
 function updateUI() {
-    console.log('Updating UI for comment-based format. Current state overview:', {
+    console.log('Updating UI. State overview:', {
         isLoading: currentState.isLoading,
         validationInProgress: currentState.validationInProgress,
         globalErrors: currentState.globalValidationErrors.length,
-        globalWarnings: currentState.globalValidationWarnings.length,
         pendingChanges: currentState.pendingChanges.length,
-        inputLength: currentState.jsonInput.length
     });
     
+    updateInputSection();
     updateStatusSection();
     updateChangesSection();
     updateHistorySection();
-    updateInputSection();
+    // No specific update needed for quickStartSection here, its class is managed by the message handler.
     
     console.log('UI update complete.');
 }
 
 function updateInputSection() {
-    // Update input field
     if (elements.inputTextarea && elements.inputTextarea.value !== currentState.jsonInput) {
         elements.inputTextarea.value = currentState.jsonInput;
     }
     
-    // Update parse button state
     if (elements.parseBtn) {
         const hasContent = currentState.jsonInput.trim().length > 0;
         const isProcessing = currentState.isLoading || currentState.validationInProgress;
         elements.parseBtn.disabled = !hasContent || isProcessing;
-        
-        // Update button text based on state
-        if (currentState.validationInProgress) {
-            elements.parseBtn.textContent = '🔄 Validating...';
-        } else if (currentState.isLoading) {
-            elements.parseBtn.textContent = '⏳ Processing...';
-        } else {
-            elements.parseBtn.textContent = '🚀 Parse Changes';
-        }
-        
-        console.log(
-            'updateInputSection: Parse button state. HasContent:', hasContent, 
-            'isProcessing:', isProcessing,
-            'Disabled:', elements.parseBtn.disabled
-        );
-    }
-    
-    // Update example/help buttons
-    const isProcessing = currentState.isLoading || currentState.validationInProgress;
-    if (elements.showExampleBtn) {
-        elements.showExampleBtn.disabled = isProcessing;
-    }
-    if (elements.showHelpBtn) {
-        elements.showHelpBtn.disabled = isProcessing;
+        elements.parseBtn.innerHTML = isProcessing 
+            ? (currentState.validationInProgress ? '🔄 Validating...' : '⏳ Processing...') 
+            : '🚀 Parse Changes';
     }
 }
 
+// updateStatusSection, showGlobalErrors, hideGlobalErrors, showGlobalWarnings, hideGlobalWarnings,
+// hideAllValidationElements, hasAnyStatusContent, createValidationErrorElement,
+// updateChangesSection, updateHistorySection, renderChangesList, createChangeElement,
+// renderChangeValidationErrors, getStatusIcon, getStatusClass, getChangeTitle, escapeHtml
+// remain the SAME as in the previous complete main.js file you have.
+// I will include them here for completeness.
+
 function updateStatusSection() {
-    console.log('Updating status section. State:', {
-        isLoading: currentState.isLoading,
-        validationInProgress: currentState.validationInProgress,
-        globalErrors: currentState.globalValidationErrors.length,
-        globalWarnings: currentState.globalValidationWarnings.length,
-        legacyError: !!currentState.error
-    });
-    
-    if (!elements.statusSection) {
-        console.warn('Status section elements not found during updateStatusSection.');
-        return;
-    }
+    if (!elements.statusSection) return;
 
-    // Always start with section hidden
     elements.statusSection.classList.add('hidden');
+    elements.loadingIndicator.classList.add('hidden');
+    hideAllValidationElements();
 
-    // Handle loading state
     if (currentState.isLoading || currentState.validationInProgress) {
         elements.statusSection.classList.remove('hidden');
         elements.loadingIndicator.classList.remove('hidden');
-        hideAllValidationElements();
-        console.log('Status: Loading/validation indicator visible.');
         return;
     }
     
-    // Hide loading indicator when not loading
-    elements.loadingIndicator.classList.add('hidden');
-    
-    // Handle global validation errors
     if (currentState.globalValidationErrors.length > 0) {
         elements.statusSection.classList.remove('hidden');
         showGlobalErrors();
-        console.log('Status: Global validation errors visible.');
-    } else {
-        hideGlobalErrors();
     }
     
-    // Handle global validation warnings
     if (currentState.globalValidationWarnings.length > 0) {
         elements.statusSection.classList.remove('hidden');
         showGlobalWarnings();
-        console.log('Status: Global validation warnings visible.');
-    } else {
-        hideGlobalWarnings();
     }
     
-    // Handle legacy error (fallback)
     if (currentState.error && currentState.globalValidationErrors.length === 0) {
         elements.statusSection.classList.remove('hidden');
         elements.errorMessage.classList.remove('hidden');
         elements.errorMessage.textContent = currentState.error;
         elements.successMessage.classList.add('hidden');
-        console.log('Status: Legacy error message visible:', currentState.error);
     } else {
         elements.errorMessage.classList.add('hidden');
     }
     
-    // Handle success message
-    if (!currentState.isLoading && 
-        !currentState.validationInProgress &&
-        currentState.globalValidationErrors.length === 0 && 
-        !currentState.error &&
-        currentState.parsedInput && 
-        currentState.pendingChanges.length > 0) {
-        
+    if (!currentState.isLoading && !currentState.validationInProgress &&
+        currentState.globalValidationErrors.length === 0 && !currentState.error &&
+        currentState.parsedInput && currentState.pendingChanges.length > 0) {
         elements.statusSection.classList.remove('hidden');
         elements.successMessage.classList.remove('hidden');
         elements.successMessage.textContent = `✅ Successfully parsed ${currentState.pendingChanges.length} changes. ${currentState.parsedInput.description || '(no description)'}`;
-        console.log('Status: Success message visible.');
     } else {
         elements.successMessage.classList.add('hidden');
     }
     
-    // Hide section if nothing to show
     if (!hasAnyStatusContent()) {
         elements.statusSection.classList.add('hidden');
-        console.log('Status: Section hidden (nothing to show).');
     }
 }
 
 function showGlobalErrors() {
     if (!elements.globalErrors || !elements.globalErrorsList) return;
-    
     elements.globalErrors.classList.remove('hidden');
     elements.globalErrorsList.innerHTML = '';
-    
     currentState.globalValidationErrors.forEach((error, index) => {
-        const errorDiv = createValidationErrorElement(error, index, 'error');
-        elements.globalErrorsList.appendChild(errorDiv);
+        elements.globalErrorsList.appendChild(createValidationErrorElement(error, index, 'error'));
     });
 }
 
 function hideGlobalErrors() {
-    if (elements.globalErrors) {
-        elements.globalErrors.classList.add('hidden');
-    }
+    if (elements.globalErrors) elements.globalErrors.classList.add('hidden');
 }
 
 function showGlobalWarnings() {
     if (!elements.globalWarnings || !elements.globalWarningsList) return;
-    
     elements.globalWarnings.classList.remove('hidden');
     elements.globalWarningsList.innerHTML = '';
-    
     currentState.globalValidationWarnings.forEach((warning, index) => {
-        const warningDiv = createValidationErrorElement(warning, index, 'warning');
-        elements.globalWarningsList.appendChild(warningDiv);
+        elements.globalWarningsList.appendChild(createValidationErrorElement(warning, index, 'warning'));
     });
 }
 
 function hideGlobalWarnings() {
-    if (elements.globalWarnings) {
-        elements.globalWarnings.classList.add('hidden');
-    }
+    if (elements.globalWarnings) elements.globalWarnings.classList.add('hidden');
 }
 
 function hideAllValidationElements() {
@@ -432,8 +349,7 @@ function hideAllValidationElements() {
 }
 
 function hasAnyStatusContent() {
-    return currentState.isLoading ||
-           currentState.validationInProgress ||
+    return currentState.isLoading || currentState.validationInProgress ||
            currentState.globalValidationErrors.length > 0 ||
            currentState.globalValidationWarnings.length > 0 ||
            !!currentState.error ||
@@ -443,10 +359,10 @@ function hasAnyStatusContent() {
 function createValidationErrorElement(validationItem, index, type) {
     const div = document.createElement('div');
     div.className = `validation-item ${type}`;
-    
     const typeLabel = type === 'error' ? '❌' : '⚠️';
-    const changeInfo = validationItem.changeIndex !== undefined ? 
-        ` (Change ${validationItem.changeIndex + 1})` : '';
+    // Adjusted to refer to 'blockIndex' if your ValidationError interface uses that, or 'changeIndex'
+    const itemContextInfo = validationItem.changeIndex !== undefined ? ` (Block ${validationItem.changeIndex + 1})` : 
+                           (validationItem.blockIndex !== undefined ? ` (Block ${validationItem.blockIndex + 1})` : '');
     const fieldInfo = validationItem.field ? ` - Field: ${validationItem.field}` : '';
     
     div.innerHTML = `
@@ -455,33 +371,25 @@ function createValidationErrorElement(validationItem, index, type) {
             <span class="validation-message">${escapeHtml(validationItem.message)}</span>
         </div>
         ${validationItem.suggestion ? `<div class="validation-suggestion">💡 ${escapeHtml(validationItem.suggestion)}</div>` : ''}
-        ${changeInfo || fieldInfo ? `<div class="validation-context">${escapeHtml(changeInfo + fieldInfo)}</div>` : ''}
+        ${itemContextInfo || fieldInfo ? `<div class="validation-context">${escapeHtml(itemContextInfo + fieldInfo)}</div>` : ''}
     `;
-    
     return div;
 }
 
+
 function updateChangesSection() {
-    if (!elements.changesSection || !elements.changesCount || !elements.selectedCount || !elements.applySelectedBtn || !elements.changesList) {
-        console.warn('Changes section elements not found during updateChangesSection.');
-        return;
-    }
+    if (!elements.changesSection || !elements.changesCount || !elements.selectedCount || !elements.applySelectedBtn || !elements.changesList) return;
 
     const hasChanges = currentState.pendingChanges.length > 0;
-    console.log('Updating changes section. Has changes:', hasChanges, 'Pending changes count:', currentState.pendingChanges.length);
-    
+    elements.changesSection.classList.toggle('hidden', !hasChanges);
+
     if (hasChanges) {
-        elements.changesSection.classList.remove('hidden');
-        
-        // Update counts and summary
         elements.changesCount.textContent = `${currentState.pendingChanges.length} changes`;
         elements.selectedCount.textContent = `${currentState.selectedChanges.length} selected`;
         
-        // Update validation summary
         if (elements.validationSummary) {
             const validCount = currentState.pendingChanges.filter(c => c.isValid).length;
             const invalidCount = currentState.pendingChanges.length - validCount;
-            
             if (invalidCount > 0) {
                 elements.validationSummary.textContent = `(${validCount} valid, ${invalidCount} invalid)`;
                 elements.validationSummary.className = 'validation-summary has-errors';
@@ -494,95 +402,55 @@ function updateChangesSection() {
             }
         }
         
-        // Update button states
         const isProcessing = currentState.isLoading || currentState.validationInProgress;
         const hasValidSelection = currentState.selectedChanges.length > 0 && 
                                  currentState.pendingChanges
                                      .filter(c => currentState.selectedChanges.includes(c.id))
                                      .every(c => c.isValid);
         
-        elements.applySelectedBtn.disabled = !hasValidSelection || isProcessing;
-        
-        if (elements.selectOnlyValidBtn) {
-            const hasValidChanges = currentState.pendingChanges.some(c => c.isValid);
-            elements.selectOnlyValidBtn.disabled = !hasValidChanges || isProcessing;
-        }
-        
-        if (elements.validateTargetsBtn) {
-            const hasPendingChanges = currentState.pendingChanges.length > 0;
-            elements.validateTargetsBtn.disabled = !hasPendingChanges || isProcessing;
-            
-            // Update button text based on validation state
-            if (currentState.validationInProgress) {
-                elements.validateTargetsBtn.textContent = '🔄 Validating...';
-            } else {
-                elements.validateTargetsBtn.textContent = '🔍 Validate Targets';
-            }
+        if(elements.applySelectedBtn) elements.applySelectedBtn.disabled = !hasValidSelection || isProcessing;
+        if(elements.selectOnlyValidBtn) elements.selectOnlyValidBtn.disabled = !currentState.pendingChanges.some(c => c.isValid) || isProcessing;
+        if(elements.validateTargetsBtn) {
+            elements.validateTargetsBtn.disabled = !currentState.pendingChanges.length > 0 || isProcessing;
+            elements.validateTargetsBtn.innerHTML = isProcessing && currentState.validationInProgress ? '🔄 Validating...' : '🔍 Validate Targets';
         }
         
         renderChangesList();
-        console.log('Changes section: Visible. Apply button disabled:', elements.applySelectedBtn.disabled);
     } else {
-        elements.changesSection.classList.add('hidden');
         elements.changesList.innerHTML = '';
-        console.log('Changes section: Hidden.');
     }
 }
 
 function updateHistorySection() {
-    if (!elements.undoLastBtn) {
-        console.warn('History section elements not found during updateHistorySection.');
-        return;
-    }
-    
+    if (!elements.undoLastBtn || !elements.showHistoryBtn) return;
     const isProcessing = currentState.isLoading || currentState.validationInProgress;
     elements.undoLastBtn.disabled = currentState.changeHistory.length === 0 || isProcessing;
-    console.log('Updating history section. Undo button disabled:', elements.undoLastBtn.disabled);
+    elements.showHistoryBtn.disabled = isProcessing; 
 }
 
 function renderChangesList() {
-    if (!elements.changesList) {
-        console.warn('Changes list element not found during renderChangesList.');
-        return;
-    }
+    if (!elements.changesList) return;
     elements.changesList.innerHTML = '';
-    console.log('Rendering changes list. Count:', currentState.pendingChanges.length);
-    
     currentState.pendingChanges.forEach(change => {
-        const changeElement = createChangeElement(change);
-        elements.changesList.appendChild(changeElement);
+        elements.changesList.appendChild(createChangeElement(change));
     });
 }
 
 function createChangeElement(change) {
     const div = document.createElement('div');
     div.className = `change-item ${change.isValid ? 'valid' : 'invalid'}`;
+    if (change.action === 'create_file') div.classList.add('create-file-change');
 
     const isSelected = currentState.selectedChanges.includes(change.id);
     const isProcessing = currentState.isLoading || currentState.validationInProgress;
-    
-    // Special styling for create_file actions
-    if (change.action === 'create_file') {
-        div.classList.add('create-file-change');
-    }
-    
-    // Determine status display
     const statusIcon = getStatusIcon(change);
     const statusClass = getStatusClass(change);
-    
-    // Special warning for create_file on existing files
     const hasOverwriteWarning = change.action === 'create_file' && 
         change.validationWarnings && 
         change.validationWarnings.some(w => w.message.includes('will be overwritten'));
     
     div.innerHTML = `
-        <input
-            type="checkbox"
-            class="change-checkbox"
-            data-change-id="${change.id}"
-            ${isSelected ? 'checked' : ''}
-            ${isProcessing ? 'disabled' : ''}
-        >
+        <input type="checkbox" class="change-checkbox" data-change-id="${change.id}" ${isSelected ? 'checked' : ''} ${isProcessing ? 'disabled' : ''}>
         <div class="change-content">
             <div class="change-header">
                 <div class="change-title">${escapeHtml(getChangeTitle(change))}</div>
@@ -591,10 +459,7 @@ function createChangeElement(change) {
             <div class="change-details">
                 <span class="change-detail">📄 ${escapeHtml(change.file)}</span>
                 <span class="change-detail">🔧 ${escapeHtml(change.action)}</span>
-                ${change.action === 'create_file' ? 
-                    `<span class="change-detail">📝 New File</span>` : 
-                    `<span class="change-detail">🎯 ${escapeHtml(change.target)}</span>`
-                }
+                ${change.action === 'create_file' ? `<span class="change-detail">📝 New File</span>` : `<span class="change-detail">🎯 ${escapeHtml(change.target)}</span>`}
                 ${change.class ? `<span class="change-detail">📦 ${escapeHtml(change.class)}</span>` : ''}
                 ${hasOverwriteWarning ? `<span class="change-detail warning">⚠️ Will Overwrite</span>` : ''}
             </div>
@@ -609,64 +474,36 @@ function createChangeElement(change) {
         </div>
     `;
 
-    // Attach event listeners
     const checkbox = div.querySelector('.change-checkbox');
-    if (checkbox) {
-        checkbox.addEventListener('change', handleChangeCheckboxChange);
-    }
-
+    if (checkbox) checkbox.addEventListener('change', handleChangeCheckboxChange);
     const previewButton = div.querySelector('.preview-btn');
-    if (previewButton) {
-        previewButton.addEventListener('click', (event) => {
-            const changeId = event.currentTarget.dataset.changeId;
-            if (changeId && !isProcessing) {
-                handlePreviewChange(changeId);
-            }
-        });
-    }
-    
+    if (previewButton) previewButton.addEventListener('click', (event) => {
+        if (!isProcessing) handlePreviewChange(event.currentTarget.dataset.changeId);
+    });
     return div;
 }
 
 function renderChangeValidationErrors(change) {
     let html = '';
-    
-    // Render validation errors
     if (change.validationErrors && change.validationErrors.length > 0) {
         html += '<div class="change-validation-errors">';
-        change.validationErrors.forEach((error, index) => {
-            html += `
-                <div class="validation-error">
-                    <span class="validation-icon">❌</span>
-                    <span class="validation-message">${escapeHtml(error.message)}</span>
-                    ${error.suggestion ? `<div class="validation-suggestion">💡 ${escapeHtml(error.suggestion)}</div>` : ''}
-                </div>
-            `;
+        change.validationErrors.forEach(error => {
+            html += `<div class="validation-error"><span class="validation-icon">❌</span><span class="validation-message">${escapeHtml(error.message)}</span>${error.suggestion ? `<div class="validation-suggestion">💡 ${escapeHtml(error.suggestion)}</div>` : ''}</div>`;
         });
         html += '</div>';
     }
-    
-    // Render validation warnings
     if (change.validationWarnings && change.validationWarnings.length > 0) {
         html += '<div class="change-validation-warnings">';
-        change.validationWarnings.forEach((warning, index) => {
-            html += `
-                <div class="validation-warning">
-                    <span class="validation-icon">⚠️</span>
-                    <span class="validation-message">${escapeHtml(warning.message)}</span>
-                    ${warning.suggestion ? `<div class="validation-suggestion">💡 ${escapeHtml(warning.suggestion)}</div>` : ''}
-                </div>
-            `;
+        change.validationWarnings.forEach(warning => {
+            html += `<div class="validation-warning"><span class="validation-icon">⚠️</span><span class="validation-message">${escapeHtml(warning.message)}</span>${warning.suggestion ? `<div class="validation-suggestion">💡 ${escapeHtml(warning.suggestion)}</div>` : ''}</div>`;
         });
         html += '</div>';
     }
-    
     return html;
 }
 
 function getStatusIcon(change) {
     if (!change.isValid) return '❌';
-    
     switch (change.status) {
         case 'pending': return '⏳';
         case 'applied': return '✅';
@@ -678,49 +515,29 @@ function getStatusIcon(change) {
 }
 
 function getStatusClass(change) {
-    if (!change.isValid) return 'invalid';
-    return change.status;
+    return change.isValid ? change.status : 'invalid';
 }
 
 function getChangeTitle(change) {
     const actionMap = {
-        'create_file': '📝 Create File',
-        'add_function': '➕ Add Function',
-        'replace_function': '🔄 Replace Function',
-        'add_method': '➕ Add Method',
-        'replace_method': '🔄 Replace Method',
-        'add_import': '📥 Add Import',
-        'add_struct': '🏗️ Add Struct',
-        'add_enum': '📋 Add Enum',
-        'replace_block': '🔄 Replace Block',
-        'insert_after': '⬇️ Insert After',
-        'insert_before': '⬆️ Insert Before',
-        'delete_function': '🗑️ Delete Function',
+        'create_file': '📝 Create File', 'add_function': '➕ Add Function', 'replace_function': '🔄 Replace Function',
+        'add_method': '➕ Add Method', 'replace_method': '🔄 Replace Method', 'add_import': '📥 Add Import',
+        'add_struct': '🏗️ Add Struct', 'add_enum': '📋 Add Enum', 'replace_block': '🔄 Replace Block',
+        'insert_after': '⬇️ Insert After', 'insert_before': '⬆️ Insert Before', 'delete_function': '🗑️ Delete Function',
         'modify_line': '✏️ Modify Line'
     };
-    
     const actionTitle = actionMap[change.action] || `🔧 ${change.action}`;
-    
-    // Show description if available, otherwise show target
-    if (change.description && change.description !== change.target) {
+    if (change.description && change.description.trim() && change.description !== change.target) {
         return `${actionTitle}: ${change.description}`;
-    } else if (change.target) {
+    } else if (change.target && change.target.trim()) {
         return `${actionTitle}: ${change.target}`;
-    } else {
-        return actionTitle;
     }
+    return actionTitle;
 }
 
 function escapeHtml(unsafe) {
-    if (typeof unsafe !== 'string') {
-        return '';
-    }
-    return unsafe
-         .replace(/&/g, "&amp;")
-         .replace(/</g, "&lt;")
-         .replace(/>/g, "&gt;")
-         .replace(/"/g, "&quot;")
-         .replace(/'/g, "&#039;");
+    if (typeof unsafe !== 'string') return '';
+    return unsafe.replace(/&/g, "&").replace(/</g, "<").replace(/>/g, ">").replace(/"/g, '"').replace(/'/g, "'");
 }
 
-console.log('Comment-based format main.js script fully parsed.');
+console.log('View title bar actions main.js script fully parsed.');

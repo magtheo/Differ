@@ -3,10 +3,10 @@
   "displayName": "Differ",
   "description": "Apply LLM-generated code changes safely with preview and rollback capabilities",
   "version": "0.0.1",
-  "publisher": "your-publisher-name",
+  "publisher": "magtheo",
   "author": {
-    "name": "Your Name",
-    "email": "your.email@example.com"
+    "name": "Theo",
+    "email": "kuletheo@gmail.com"
   },
   "license": "MIT",
   "repository": {
@@ -70,6 +70,21 @@
         "command": "differ.undoLastChanges",
         "title": "Undo Last Changes",
         "category": "Differ"
+      },
+      {
+        "command": "differ.view.showExample",
+        "title": "Show Example Format",
+        "category": "Differ"
+      },
+      {
+        "command": "differ.view.showHelp",
+        "title": "Show Format Documentation",
+        "category": "Differ"
+      },
+      {
+        "command": "differ.view.toggleQuickStart",
+        "title": "Toggle Quick Start Guide",
+        "category": "Differ"
       }
     ],
     "viewsContainers": {
@@ -116,7 +131,41 @@
           "description": "Maximum number of history entries to keep"
         }
       }
-    }
+    },
+    "submenus": [
+      {
+        "id": "differViewActionsSubmenu",
+        "label": "Differ Options",
+        "icon": "$(ellipsis)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "when": "view == differ-panel",
+          "group": "navigation",
+          "submenu": "differViewActionsSubmenu"
+        }
+      ],
+      "differViewActionsSubmenu": [
+        {
+          "command": "differ.view.showExample",
+          "group": "1_help@1"
+        },
+        {
+          "command": "differ.view.showHelp",
+          "group": "1_help@2"
+        },
+        {
+          "type": "separator",
+          "group": "2_separator"
+        },
+        {
+          "command": "differ.view.toggleQuickStart",
+          "group": "3_actions@1"
+        }
+      ]
+    }    
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
@@ -144,12 +193,11 @@
     "eslint": "^9.25.1",
     "typescript": "^5.8.3"
   },
-  "dependencies": {
-  },
+  "dependencies": {},
   "extensionDependencies": [],
   "__metadata": {
-    "id": "differ",
-    "publisherId": "your-publisher-id",
-    "publisherDisplayName": "Your Publisher Name"
+    "id": "magtheo.differ",
+    "publisherId": "magtheo",
+    "publisherDisplayName": "magtheo"
   }
 }
