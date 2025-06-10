@@ -1,17 +1,11 @@
 // FILE: src/extension.ts
 import * as vscode from 'vscode';
-import { ChangeParser, ParsedInput, ValidationResult, ParsedChange } from './parser/inputParser';
+import { ChangeParser, ParsedInput, ParsedChange } from './parser/inputParser';
 import { DifferProvider } from './ui/webViewProvider';
 import { CodeAnalyzer, Position, SymbolInfo } from './analysis/codeAnalyzer';
 
 // Store the provider instance to be accessible by command handlers
 let differProviderInstance: DifferProvider | undefined;
-
-interface DifferState { // This state is for the legacy command palette flow, less relevant for webview-centric actions
-    parsedInput: ParsedInput | null;
-    lastValidationResult: ValidationResult | null;
-    previewContent: string | null;
-}
 
 /**
  * A change that has been resolved to a specific start and end position in a file.
@@ -28,13 +22,6 @@ export async function activate(context: vscode.ExtensionContext) {
     // Initialize the CodeAnalyzer with the TreeSitterService
     await CodeAnalyzer.initialize(context);
 
-    // Extension state (for legacy command palette flow)
-    const state: DifferState = {
-        parsedInput: null,
-        lastValidationResult: null,
-        previewContent: null
-    };
-
     // Create and register the webview provider
     const provider = new DifferProvider(context.extensionUri, context);
     differProviderInstance = provider; // Store the instance
@@ -43,29 +30,28 @@ export async function activate(context: vscode.ExtensionContext) {
         vscode.window.registerWebviewViewProvider(DifferProvider.viewType, provider)
     );
 
-    // Register existing commands
-    const existingCommands = [
+    // Register commands. All interaction logic is now initiated from the webview.
+    const commands = [
         vscode.commands.registerCommand('differ.openPanel', () => provider.show()),
         vscode.commands.registerCommand('differ.applyChanges', (inputFromWebview?: ParsedInput) => {
-            const effectiveInput = inputFromWebview || state.parsedInput;
-            if (!effectiveInput) {
-                console.warn('applyChanges called without effective input. Webview should provide it.');
+            if (!inputFromWebview) {
+                console.warn('applyChanges called without effective input. The webview should always provide it.');
                 vscode.window.showWarningMessage('No changes to apply. Please parse input in the Differ panel.');
                 return;
             }
-            applyChanges(effectiveInput);
+            applyChanges(inputFromWebview);
         }),
         vscode.commands.registerCommand('differ.clearChanges', () => {
-            clearChanges(state);
-            provider.clearChanges();
+            if (differProviderInstance) {
+                differProviderInstance.clearChanges();
+                vscode.window.showInformationMessage('Differ changes cleared.');
+            }
         }),
-        vscode.commands.registerCommand('differ.parseInput', () => parseUserInput(state)),
-        vscode.commands.registerCommand('differ.previewChanges', () => previewChanges(state))
     ];
 
-    context.subscriptions.push(...existingCommands);
+    context.subscriptions.push(...commands);
 
-    // Register NEW commands for the view title bar
+    // Register commands for the view title bar
     const viewTitleCommands = [
         vscode.commands.registerCommand('differ.view.showExample', async () => {
             const example = ChangeParser.generateExample();
@@ -87,7 +73,7 @@ export async function activate(context: vscode.ExtensionContext) {
     ];
     context.subscriptions.push(...viewTitleCommands);
 
-    // Legacy commands (Show History, Undo) - these are placeholders as per your package.json
+    // Placeholder commands for future features
     context.subscriptions.push(
         vscode.commands.registerCommand('differ.showHistory', () => {
             vscode.window.showInformationMessage('Differ: Show Change History - Not yet implemented.');
@@ -96,20 +82,6 @@ export async function activate(context: vscode.ExtensionContext) {
             vscode.window.showInformationMessage('Differ: Undo Last Changes - Not yet implemented.');
         })
     );
-}
-
-// Legacy function, might be refactored or removed if webview handles all parsing initiation
-async function parseUserInput(state: DifferState) {
-    // ... implementation remains the same
-}
-
-// Legacy function
-async function previewChanges(state: DifferState) {
-    // ... implementation remains the same
-}
-
-async function showPreview(content: string) {
-    // ... implementation remains the same
 }
 
 async function applyChanges(input: ParsedInput) {
@@ -176,14 +148,11 @@ async function applyChangesToFile(filePath: string, changes: ParsedChange[], wor
         throw new Error(`File ${filePath} does not exist. Use "create_file" action to create it.`);
     }
 
-    // --- Phase 2: Pre-computation Step ---
+    // --- Phase 1: Pre-computation Step ---
     const positionalChanges: PositionalChange[] = [];
     for (const change of changes) {
-        const validationResult = await CodeAnalyzer.validateFunction(filePath, change.target, workspace); // Example, needs to be generic
-        
         let symbolInfo: SymbolInfo | undefined;
 
-        // This switch should be more robust, delegating to the right CodeAnalyzer method.
         switch(change.action) {
             case 'replace_function': {
                 const result = await CodeAnalyzer.validateFunction(filePath, change.target, workspace);
@@ -196,22 +165,72 @@ async function applyChangesToFile(filePath: string, changes: ParsedChange[], wor
                 if (result.exists && result.symbolInfo) symbolInfo = result.symbolInfo;
                 break;
             }
-            // Add other cases for add_function, add_method, etc.
-            // For add_method, the target is the class, so we need its end position.
             case 'add_method': {
                  if (!change.class) throw new Error(`Action 'add_method' requires a CLASS for target '${change.target}'.`);
                  const result = await CodeAnalyzer.validateClass(filePath, change.class, workspace);
                  if (result.exists && result.symbolInfo) {
                     // We insert just before the closing brace of the class.
                     const classBodyEndOffset = result.symbolInfo.end.offset - 1;
+
+                    // Determine indentation from the line before the class closing brace
+                    const lineStartOffset = content.lastIndexOf('\n', classBodyEndOffset) + 1;
+                    const previousLine = content.substring(lineStartOffset, classBodyEndOffset);
+                    const indentation = (previousLine.match(/^\s*/)?.[0] || '    ');
+                    const indentedCode = change.code.split('\n').map(line => indentation + line).join('\n');
+
                     symbolInfo = { 
                         name: change.target,
                         start: { ...result.symbolInfo.end, offset: classBodyEndOffset },
                         end: { ...result.symbolInfo.end, offset: classBodyEndOffset },
                     };
-                    change.code = `\n    ${change.code}\n`; // Add some formatting
+                    change.code = `\n${indentedCode}\n`; // Add newlines around the indented code
                  }
                  break;
+            }
+            case 'replace_block': {
+                const result = await CodeAnalyzer.validateBlock(filePath, change.target, workspace);
+                if (result.exists && result.symbolInfo) symbolInfo = result.symbolInfo;
+                break;
+            }
+            case 'insert_after': {
+                const result = await CodeAnalyzer.validateBlock(filePath, change.target, workspace);
+                if (result.exists && result.symbolInfo) {
+                    const eolIndex = content.indexOf('\n', result.symbolInfo.end.offset);
+                    const insertionPoint = eolIndex !== -1 ? eolIndex + 1 : content.length;
+
+                    const lineStartOffset = content.lastIndexOf('\n', result.symbolInfo.start.offset) + 1;
+                    const lineContentBeforeTarget = content.substring(lineStartOffset, result.symbolInfo.start.offset);
+                    const indentation = lineContentBeforeTarget.match(/^\s*/)?.[0] || '';
+                    
+                    const indentedCode = change.code.split('\n').map(line => indentation + line).join('\n');
+
+                    symbolInfo = {
+                        name: change.target,
+                        start: { ...result.symbolInfo.end, offset: insertionPoint },
+                        end: { ...result.symbolInfo.end, offset: insertionPoint },
+                    };
+                    change.code = `${indentedCode}\n`;
+                }
+                break;
+            }
+            case 'insert_before': {
+                const result = await CodeAnalyzer.validateBlock(filePath, change.target, workspace);
+                if (result.exists && result.symbolInfo) {
+                    const insertionPoint = content.lastIndexOf('\n', result.symbolInfo.start.offset - 1) + 1;
+
+                    const lineContentBeforeTarget = content.substring(insertionPoint, result.symbolInfo.start.offset);
+                    const indentation = lineContentBeforeTarget.match(/^\s*/)?.[0] || '';
+                    
+                    const indentedCode = change.code.split('\n').map(line => indentation + line).join('\n');
+
+                    symbolInfo = {
+                        name: change.target,
+                        start: { ...result.symbolInfo.start, offset: insertionPoint },
+                        end: { ...result.symbolInfo.start, offset: insertionPoint },
+                    };
+                    change.code = `${indentedCode}\n`;
+                }
+                break;
             }
         }
         
@@ -247,12 +266,16 @@ function applySingleChangeToContent(content: string, change: PositionalChange): 
     switch (action) {
         case 'replace_function':
         case 'replace_method':
+        case 'replace_block':
             // Replace the entire block from its start to its end.
             return content.slice(0, start.offset) + code + content.slice(end.offset);
         
         case 'add_method':
-            // Insert the new method at the calculated position (just before class closing brace).
-            return content.slice(0, start.offset) + code + content.slice(end.offset);
+        case 'insert_after':
+        case 'insert_before':
+            // For insertion actions, start and end offsets are the same point.
+            // We replace a zero-length string at the start offset with the new code.
+            return content.slice(0, start.offset) + code + content.slice(start.offset);
 
         // Add other actions here...
         // case 'add_import':
@@ -262,13 +285,6 @@ function applySingleChangeToContent(content: string, change: PositionalChange): 
             console.warn(`Unsupported positional action: ${action}`);
             return content;
     }
-}
-
-function clearChanges(state: DifferState) {
-    state.parsedInput = null;
-    state.lastValidationResult = null;
-    state.previewContent = null;
-    vscode.window.showInformationMessage('Legacy state cleared.');
 }
 
 export function deactivate() {

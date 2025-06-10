@@ -290,10 +290,11 @@ export class ValidationEngine {
             case 'replace_block':
             case 'insert_after':
             case 'insert_before':
+                return await CodeAnalyzer.validateBlock(change.file, change.target, workspace);
+            
             case 'modify_line':
-                // These actions use target as a search string or line reference
-                // We'll do a simple text search
-                return await this.validateTextTarget(change, workspace);
+                 // This action has specific logic not covered by standard target validation
+                return { exists: true, confidence: 'low', reason: "modify_line validation not yet implemented." };
                 
             default:
                 return {
@@ -302,72 +303,6 @@ export class ValidationEngine {
                     suggestions: [`Unknown action type: ${change.action}`]
                 };
         }
-    }
-
-    /**
-     * Validate text-based targets (for replace_block, insert_after, etc.)
-     */
-    private static async validateTextTarget(change: ParsedChange, workspace: vscode.WorkspaceFolder): Promise<TargetValidationResult> {
-        try {
-            const fileUri = vscode.Uri.joinPath(workspace.uri, change.file);
-            const fileData = await vscode.workspace.fs.readFile(fileUri);
-            const content = Buffer.from(fileData).toString('utf8');
-            
-            // Check if target text exists in file
-            const targetExists = content.includes(change.target);
-            
-            if (targetExists) {
-                // Find line number where target appears
-                const lines = content.split('\n');
-                for (let i = 0; i < lines.length; i++) {
-                    if (lines[i].includes(change.target)) {
-                        return {
-                            exists: true,
-                            location: { line: i + 1, column: lines[i].indexOf(change.target) + 1 },
-                            confidence: 'high'
-                        };
-                    }
-                }
-            }
-            
-            return {
-                exists: false,
-                reason: `Target text "${change.target}" not found in ${change.file}`,
-                confidence: 'high',
-                suggestions: this.suggestSimilarText(change.target, content)
-            };
-            
-        } catch (error) {
-            return {
-                exists: false,
-                reason: `Cannot read file ${change.file}: ${error}`,
-                confidence: 'high',
-                suggestions: []
-            };
-        }
-    }
-
-    /**
-     * Suggest similar text from file content
-     */
-    private static suggestSimilarText(target: string, content: string): string[] {
-        const lines = content.split('\n');
-        const suggestions: string[] = [];
-        
-        // Look for lines that contain part of the target
-        const targetWords = target.toLowerCase().split(/\s+/);
-        
-        for (const line of lines) {
-            const lineWords = line.toLowerCase().split(/\s+/);
-            const commonWords = targetWords.filter(word => lineWords.some(lineWord => lineWord.includes(word)));
-            
-            if (commonWords.length > 0 && line.trim().length > 0) {
-                suggestions.push(line.trim());
-                if (suggestions.length >= 3) break;
-            }
-        }
-        
-        return suggestions;
     }
 
     /**

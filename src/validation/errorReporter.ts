@@ -409,8 +409,8 @@ export class ErrorReporter {
     public static formatTargetValidation(result: TargetValidationResult, change: ParsedChange): string {
         if (result.exists) {
             let message = `✅ Target "${change.target}" found`;
-            if (result.location) {
-                message += ` at line ${result.location.line}`;
+            if (result.symbolInfo) {
+                message += ` at line ${result.symbolInfo.start.line}`;
             }
             if (result.confidence !== 'high') {
                 message += ` (${result.confidence} confidence)`;
@@ -506,7 +506,7 @@ export class ErrorReporter {
      */
     public static generatePerformanceReport(validationSummary: ValidationSummary): string {
         const { summary } = validationSummary;
-        const avgTimePerChange = summary.processingTimeMs / summary.totalChanges;
+        const avgTimePerChange = summary.totalChanges > 0 ? summary.processingTimeMs / summary.totalChanges : 0;
         
         let report = `🚀 Performance Report:\n`;
         report += `• Total validation time: ${summary.processingTimeMs}ms\n`;

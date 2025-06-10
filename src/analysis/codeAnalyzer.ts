@@ -252,7 +252,67 @@ export class CodeAnalyzer {
             suggestions
         };
     }
+
+    /**
+     * Validates if a specific block of text exists as a distinct AST node.
+     */
+    public static async validateBlock(filePath: string, targetText: string, workspace: vscode.WorkspaceFolder): Promise<TargetValidationResult> {
+        const analysis = await this.analyzeFile(filePath, workspace);
+        if (!analysis.isReadable || !analysis.tree) {
+            return { exists: false, reason: analysis.parseErrors?.[0] || 'File cannot be read or parsed', confidence: 'high' };
+        }
+        
+        const node = this.findNodeByText(analysis.tree, targetText);
+        
+        if (node) {
+            const symbolInfo: SymbolInfo = {
+                name: targetText.substring(0, 50) + '...', // Use a snippet as the "name"
+                start: {
+                    line: node.startPosition.row + 1,
+                    column: node.startPosition.column + 1,
+                    offset: node.startIndex
+                },
+                end: {
+                    line: node.endPosition.row + 1,
+                    column: node.endPosition.column + 1,
+                    offset: node.endIndex
+                }
+            };
+            return { exists: true, symbolInfo: symbolInfo, confidence: 'medium' };
+        }
+        
+        const suggestions = this.findSimilarText(targetText, analysis.content || '');
+        return { 
+            exists: false, 
+            reason: `Code block starting with "${targetText.substring(0, 30)}..." not found as a distinct syntax node.`, 
+            confidence: 'high',
+            suggestions
+        };
+    }
     
+    /**
+     * Finds a syntax node that exactly matches the given text.
+     */
+    private static findNodeByText(tree: Parser.Tree, text: string): Parser.SyntaxNode | undefined {
+        let foundNode: Parser.SyntaxNode | undefined;
+        const targetTrimmed = text.trim();
+
+        function walk(node: Parser.SyntaxNode) {
+            if (foundNode) { return; }
+
+            if (node.text.trim() === targetTrimmed) {
+                foundNode = node;
+                return;
+            }
+
+            for (const child of node.namedChildren) {
+                walk(child);
+            }
+        }
+        walk(tree.rootNode);
+        return foundNode;
+    }
+
     // Helper methods (getLanguageFromFile, findSimilarNames, levenshteinDistance) remain unchanged.
     private static getLanguageFromFile(filePath: string): string {
         const ext = path.extname(filePath).toLowerCase();
@@ -272,6 +332,29 @@ export class CodeAnalyzer {
         .slice(0, maxSuggestions);
         
         return similarities.map(item => item.name);
+    }
+    
+    /**
+     * Finds lines in content that are similar to the target text snippet.
+     */
+    private static findSimilarText(target: string, content: string, maxSuggestions = 3): string[] {
+        if (!content) return [];
+        const targetFirstLine = target.split('\n')[0].trim();
+        if (!targetFirstLine) return [];
+
+        const lines = content.split('\n');
+        const suggestions: string[] = [];
+
+        for (const line of lines) {
+            const trimmedLine = line.trim();
+            if (trimmedLine.length > 5 && trimmedLine.includes(targetFirstLine)) {
+                suggestions.push(trimmedLine.substring(0, 100)); // Push a snippet
+                if (suggestions.length >= maxSuggestions) {
+                    break;
+                }
+            }
+        }
+        return suggestions;
     }
 
     private static calculateSimilarity(a: string, b: string): number {
