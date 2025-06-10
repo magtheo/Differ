@@ -111,7 +111,12 @@
       "properties": {
         "differ.logLevel": {
           "type": "string",
-          "enum": ["debug", "info", "warn", "error"],
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ],
           "default": "info",
           "description": "Set the logging level for the extension"
         },
@@ -165,14 +170,15 @@
           "group": "3_actions@1"
         }
       ]
-    }    
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "compile-webview": "npm run compile && npm run copy-webview",
+    "compile-webview": "npm run compile && npm run copy-webview && npm run copy-grammars",
     "copy-webview": "mkdir -p out/webview && cp -r src/webview/* out/webview/ 2>/dev/null || (mkdir -p out/webview && echo 'No webview files to copy')",
+    "copy-grammars": "mkdir -p out/grammars && cp -r grammars/*.wasm out/grammars/ 2>/dev/null || (mkdir -p out/grammars && echo 'No grammar files to copy')",
     "clean": "rm -rf out/ node_modules/.cache",
     "rebuild": "npm run clean && npm run compile-webview",
     "pretest": "npm run compile && npm run lint",
@@ -193,7 +199,14 @@
     "eslint": "^9.25.1",
     "typescript": "^5.8.3"
   },
-  "dependencies": {},
+  "dependencies": {
+    "tree-sitter": "^0.25.0",
+    "tree-sitter-javascript": "^0.23.1",
+    "tree-sitter-python": "^0.23.6",
+    "tree-sitter-rust": "^0.24.0",
+    "tree-sitter-typescript": "^0.23.2",
+    "web-tree-sitter": "^0.25.6"
+  },
   "extensionDependencies": [],
   "__metadata": {
     "id": "magtheo.differ",
