@@ -1,6 +1,8 @@
+// FILE: src/extension.ts
 import * as vscode from 'vscode';
 import { ChangeParser, ParsedInput, ValidationResult } from './parser/inputParser'; // Make sure ParsedInput is exported if needed by applyChanges
 import { DifferProvider } from './ui/webViewProvider';
+import { CodeAnalyzer } from './analysis/codeAnalyzer';
 
 // Store the provider instance to be accessible by command handlers
 let differProviderInstance: DifferProvider | undefined;
@@ -11,9 +13,12 @@ interface DifferState { // This state is for the legacy command palette flow, le
     previewContent: string | null;
 }
 
-export function activate(context: vscode.ExtensionContext) {
+export async function activate(context: vscode.ExtensionContext) {
     console.log('🚀 Differ extension is now active!');
     
+    // Initialize the CodeAnalyzer with the TreeSitterService
+    await CodeAnalyzer.initialize(context);
+
     // Extension state (for legacy command palette flow)
     const state: DifferState = {
         parsedInput: null,
@@ -46,7 +51,9 @@ export function activate(context: vscode.ExtensionContext) {
                 vscode.window.showWarningMessage('No changes to apply. Please parse input in the Differ panel.');
                 return;
             }
-            applyChanges(effectiveInput);
+            if (effectiveInput) {
+                applyChanges(effectiveInput);
+            }
         }),
         vscode.commands.registerCommand('differ.clearChanges', () => {
             clearChanges(state); // Clears legacy state
@@ -133,7 +140,9 @@ async function parseUserInput(state: DifferState) {
         vscode.window.showInformationMessage(summary);
 
         state.previewContent = ChangeParser.generatePreview(parsedInput);
-        await showPreview(state.previewContent);
+        if (state.previewContent) {
+            await showPreview(state.previewContent);
+        }
 
     } catch (error) {
         const message = error instanceof Error ? error.message : 'Unknown error';
@@ -151,7 +160,9 @@ async function previewChanges(state: DifferState) {
     if (!state.previewContent) {
         state.previewContent = ChangeParser.generatePreview(state.parsedInput);
     }
-    await showPreview(state.previewContent);
+    if (state.previewContent) {
+        await showPreview(state.previewContent);
+    }
 }
 
 async function showPreview(content: string) {
@@ -167,12 +178,7 @@ async function showPreview(content: string) {
 
 // applyChanges can now be called with ParsedInput directly from the webview flow
 // or potentially from legacy state if 'differ.applyChanges' is triggered elsewhere.
-async function applyChanges(input: ParsedInput | null) {
-    if (!input) {
-        vscode.window.showErrorMessage('No changes to apply. Parse input first.');
-        return;
-    }
-
+async function applyChanges(input: ParsedInput) {
     const workspace = vscode.workspace.workspaceFolders?.[0];
     if (!workspace) {
         vscode.window.showErrorMessage('No workspace folder found');
@@ -210,15 +216,21 @@ async function applyChanges(input: ParsedInput | null) {
                 },
                 'Yes', 'No'
             );
-            if (proceed !== 'Yes') return;
+            if (proceed !== 'Yes') {
+                return;
+            }
         }
 
         const createFileChanges = input.changes.filter(c => c.action === 'create_file');
         const modifyFileChanges = input.changes.filter(c => c.action !== 'create_file');
         let confirmMessage = `Apply ${input.changes.length} changes?`;
         let detailMessage = '';
-        if (createFileChanges.length > 0) detailMessage += `• ${createFileChanges.length} new files will be created\n`;
-        if (modifyFileChanges.length > 0) detailMessage += `• ${modifyFileChanges.length} existing files will be modified\n`;
+        if (createFileChanges.length > 0) {
+            detailMessage += `• ${createFileChanges.length} new files will be created\n`;
+        }
+        if (modifyFileChanges.length > 0) {
+            detailMessage += `• ${modifyFileChanges.length} existing files will be modified\n`;
+        }
         const affectedFiles = [...new Set(input.changes.map(c => c.file))];
         detailMessage += `• ${affectedFiles.length} total files affected`;
 
@@ -227,14 +239,20 @@ async function applyChanges(input: ParsedInput | null) {
             { modal: true, detail: detailMessage },
             'Apply Changes', 'Cancel'
         );
-        if (confirmResult !== 'Apply Changes') return;
+        if (confirmResult !== 'Apply Changes') {
+            return;
+        }
 
         vscode.window.showInformationMessage('Applying changes...');
         await applyParsedChanges(input, workspace);
         
         let successMessage = 'Changes applied successfully!';
-        if (createFileChanges.length > 0) successMessage += ` Created ${createFileChanges.length} new files.`;
-        if (modifyFileChanges.length > 0) successMessage += ` Modified ${modifyFileChanges.length} existing files.`;
+        if (createFileChanges.length > 0) {
+            successMessage += ` Created ${createFileChanges.length} new files.`;
+        }
+        if (modifyFileChanges.length > 0) {
+            successMessage += ` Modified ${modifyFileChanges.length} existing files.`;
+        }
         vscode.window.showInformationMessage(successMessage);
         
         // Optionally, inform the webview that changes were applied so it can update its state
@@ -295,8 +313,12 @@ async function applyChangesToFile(filePath: string, changes: any[], workspace: v
         await vscode.workspace.fs.writeFile(fullPath, writeData);
         
         const actionSummary = [];
-        if (createFileChanges.length > 0) actionSummary.push(fileExists ? 'overwritten' : 'created');
-        if (otherChanges.length > 0) actionSummary.push(`${otherChanges.length} modifications applied`);
+        if (createFileChanges.length > 0) {
+            actionSummary.push(fileExists ? 'overwritten' : 'created');
+        }
+        if (otherChanges.length > 0) {
+            actionSummary.push(`${otherChanges.length} modifications applied`);
+        }
         console.log(`File ${filePath}: ${actionSummary.join(', ')}`);
         
     } catch (error) {
