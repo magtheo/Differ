@@ -1,29 +1,61 @@
-// FILE: src/analysis/codeAnalyzer.ts
 import * as vscode from 'vscode';
 import * as path from 'path';
 import Parser from 'tree-sitter';
 import { TreeSitterService } from './treeSitterService';
 
-// TargetValidationResult interface remains the same.
+// --- NEW/UPDATED INTERFACES FOR POSITIONAL DATA ---
+
+/**
+ * Represents a specific point in the source code, including line, column, and absolute character offset.
+ */
+export interface Position {
+    line: number;    // 1-based
+    column: number;  // 1-based
+    offset: number;  // 0-based character index from the start of the file
+}
+
+/**
+ * Contains information about a named symbol (function, class, method) found in the code,
+ * including its exact start and end positions.
+ */
+export interface SymbolInfo {
+    name: string;
+    start: Position;
+    end: Position;
+}
+
+/**
+ * Extends SymbolInfo for classes, adding a list of methods found within the class.
+ */
+export interface ClassInfo extends SymbolInfo {
+    methods: SymbolInfo[];
+}
+
+/**
+ * The result of validating a specific target. On success, it can include the full SymbolInfo.
+ */
 export interface TargetValidationResult {
     exists: boolean;
-    location?: { line: number; column: number; };
+    symbolInfo?: SymbolInfo | ClassInfo; // Return the full symbol on success
     suggestions?: string[];
     reason?: string;
     confidence: 'high' | 'medium' | 'low';
 }
 
+/**
+ * The result of analyzing a file, now containing lists of rich SymbolInfo objects.
+ */
 export interface FileAnalysisResult {
     fileExists: boolean;
     isReadable: boolean;
     content?: string;
     language?: string;
-    functions: string[];
-    classes: Map<string, string[]>; // className -> methodNames[]
-    imports: string[];
+    functions: SymbolInfo[];
+    classes: Map<string, ClassInfo>; // className -> ClassInfo
+    imports: SymbolInfo[];
     lineCount: number;
     parseErrors?: string[];
-    tree?: Parser.Tree; // This should work now
+    tree?: Parser.Tree;
 }
 
 export class CodeAnalyzer {
@@ -39,13 +71,13 @@ export class CodeAnalyzer {
     private static readonly MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB limit
 
     /**
-     * Analyze a file and extract its structure using Tree-sitter
+     * Analyze a file and extract its structure using Tree-sitter.
      */
     public static async analyzeFile(filePath: string, workspace: vscode.WorkspaceFolder): Promise<FileAnalysisResult> {
         const fullPath = vscode.Uri.joinPath(workspace.uri, filePath);
         
         try {
-            // File existence and size checks (remain the same)
+            // File existence and size checks
             let fileStat;
             try {
                 fileStat = await vscode.workspace.fs.stat(fullPath);
@@ -57,13 +89,13 @@ export class CodeAnalyzer {
                 return { fileExists: true, isReadable: false, functions: [], classes: new Map(), imports: [], lineCount: 0, parseErrors: [`File too large.`] };
             }
 
-            // Read file content (remains the same)
+            // Read file content
             const fileData = await vscode.workspace.fs.readFile(fullPath);
             const content = Buffer.from(fileData).toString('utf8');
             const language = this.getLanguageFromFile(filePath);
             const lineCount = content.split('\n').length;
             
-            // --- NEW: Tree-sitter parsing ---
+            // --- Tree-sitter parsing ---
             if (!this._treeSitterService) {
                 throw new Error("CodeAnalyzer's TreeSitterService not initialized.");
             }
@@ -73,9 +105,9 @@ export class CodeAnalyzer {
                 return { fileExists: true, isReadable: true, content, language, functions: [], classes: new Map(), imports: [], lineCount, parseErrors: [`Failed to parse file with Tree-sitter for language '${language}'.`] };
             }
 
-            const functions = this.extractByQuery(tree, language, 'functions');
-            const classAnalysis = this.extractClassesWithMethods(tree, language);
-            const imports = this.extractByQuery(tree, language, 'imports');
+            const functions = await this.extractSymbols(tree, language, 'functions');
+            const classAnalysis = await this.extractClassesWithMethods(tree, language);
+            const imports = await this.extractSymbols(tree, language, 'imports');
 
             return {
                 fileExists: true,
@@ -86,7 +118,7 @@ export class CodeAnalyzer {
                 classes: classAnalysis,
                 imports,
                 lineCount,
-                tree // Optionally return the tree for advanced use
+                tree
             };
 
         } catch (error) {
@@ -95,86 +127,74 @@ export class CodeAnalyzer {
         }
     }
 
-    private static extractByQuery(tree: Parser.Tree, language: string, queryType: 'functions' | 'classes' | 'imports' | 'methods', contextNode?: Parser.SyntaxNode): string[] {
+    /**
+     * A generic method to extract symbols based on a query. It now returns full SymbolInfo.
+     */
+    private static extractSymbols(tree: Parser.Tree, language: string, queryType: 'functions' | 'classes' | 'imports' | 'methods', contextNode?: Parser.SyntaxNode): SymbolInfo[] {
         const captures = this._treeSitterService.query(tree, language, queryType);
-        const names = new Set<string>();
+        const symbols: SymbolInfo[] = [];
 
         for (const capture of captures) {
-            // If a contextNode is provided, only include captures within that node's range.
-            if (contextNode) {
-                if (capture.node.startIndex >= contextNode.startIndex && capture.node.endIndex <= contextNode.endIndex) {
-                    names.add(capture.node.text);
+            const nameNode = capture.node;
+            // The actual block we want to replace is the parent of the name identifier.
+            const symbolBlockNode = nameNode.parent;
+
+            if (symbolBlockNode) {
+                // Check if we are within the specified context
+                if (contextNode && (symbolBlockNode.startIndex < contextNode.startIndex || symbolBlockNode.endIndex > contextNode.endIndex)) {
+                    continue;
                 }
-            } else {
-                names.add(capture.node.text);
+                
+                symbols.push({
+                    name: nameNode.text,
+                    start: {
+                        line: symbolBlockNode.startPosition.row + 1,
+                        column: symbolBlockNode.startPosition.column + 1,
+                        offset: symbolBlockNode.startIndex
+                    },
+                    end: {
+                        line: symbolBlockNode.endPosition.row + 1,
+                        column: symbolBlockNode.endPosition.column + 1,
+                        offset: symbolBlockNode.endIndex
+                    }
+                });
             }
         }
-        return Array.from(names).sort();
+        return symbols;
     }
 
-    private static extractClassesWithMethods(tree: Parser.Tree, language: string): Map<string, string[]> {
-        const classMap = new Map<string, string[]>();
-        const classCaptures = this._treeSitterService.query(tree, language, 'classes');
+    private static extractClassesWithMethods(tree: Parser.Tree, language: string): Map<string, ClassInfo> {
+        const classMap = new Map<string, ClassInfo>();
+        const classSymbols = this.extractSymbols(tree, language, 'classes');
 
-        for (const capture of classCaptures) {
-            const className = capture.node.text;
-            const classNode = capture.node.parent; // The full class_declaration node
+        for (const classSymbol of classSymbols) {
+            // To find the node for the class, we need to re-query and find the one that matches our symbol
+            const classNode = tree.rootNode.descendantForPosition(
+                { row: classSymbol.start.line - 1, column: classSymbol.start.column - 1 },
+                { row: classSymbol.end.line - 1, column: classSymbol.end.column - 1 }
+            );
+
             if (classNode) {
-                const methods = this.extractByQuery(tree, language, 'methods', classNode);
-                classMap.set(className, methods);
-            } else {
-                classMap.set(className, []);
+                const methods = this.extractSymbols(tree, language, 'methods', classNode);
+                classMap.set(classSymbol.name, { ...classSymbol, methods });
             }
         }
         return classMap;
     }
-    
-    private static async findSymbolLocation(filePath: string, workspace: vscode.WorkspaceFolder, queryType: 'functions' | 'classes' | 'methods' | 'imports', symbolName: string, className?: string): Promise<{ line: number, column: number } | undefined> {
-        const analysis = await this.analyzeFile(filePath, workspace);
-        if (!analysis.tree || !analysis.language) {
-            return undefined;
-        }
-        
-        const captures = this._treeSitterService.query(analysis.tree, analysis.language, queryType);
 
-        for (const capture of captures) {
-            if (capture.node.text === symbolName) {
-                if (className) {
-                    // For methods, verify it's in the right class
-                    let parent = capture.node.parent;
-                    while (parent) {
-                        if (parent.type.includes('class_definition') || parent.type.includes('class_declaration')) {
-                            const classIdentifierNode = parent.childForFieldName('name');
-                            if (classIdentifierNode && classIdentifierNode.text === className) {
-                                const { row, column } = capture.node.startPosition;
-                                return { line: row + 1, column: column + 1 };
-                            }
-                        }
-                        parent = parent.parent;
-                    }
-                } else {
-                    // For functions and classes
-                    const { row, column } = capture.node.startPosition;
-                    return { line: row + 1, column: column + 1 };
-                }
-            }
-        }
-        return undefined;
-    }
-    
     public static async validateFunction(filePath: string, functionName: string, workspace: vscode.WorkspaceFolder): Promise<TargetValidationResult> {
         const analysis = await this.analyzeFile(filePath, workspace);
         if (!analysis.isReadable) {
             return { exists: false, reason: analysis.parseErrors?.[0] || 'File cannot be read or parsed', confidence: 'high' };
         }
         
-        const functionExists = analysis.functions.includes(functionName);
-        if (functionExists) {
-            const location = await this.findSymbolLocation(filePath, workspace, 'functions', functionName);
-            return { exists: true, location, confidence: 'high' };
+        const func = analysis.functions.find(f => f.name === functionName);
+        if (func) {
+            return { exists: true, symbolInfo: func, confidence: 'high' };
         }
         
-        return { exists: false, reason: `Function "${functionName}" not found.`, confidence: 'high', suggestions: this.findSimilarNames(functionName, analysis.functions) };
+        const suggestions = this.findSimilarNames(functionName, analysis.functions.map(f => f.name));
+        return { exists: false, reason: `Function "${functionName}" not found.`, confidence: 'high', suggestions };
     }
 
     public static async validateMethod(filePath: string, className: string, methodName: string, workspace: vscode.WorkspaceFolder): Promise<TargetValidationResult> {
@@ -183,18 +203,19 @@ export class CodeAnalyzer {
             return { exists: false, reason: analysis.parseErrors?.[0] || 'File cannot be read or parsed', confidence: 'high' };
         }
 
-        const classMethods = analysis.classes.get(className);
-        if (!classMethods) {
-            return { exists: false, reason: `Class "${className}" not found.`, confidence: 'high', suggestions: this.findSimilarNames(className, Array.from(analysis.classes.keys())) };
+        const classInfo = analysis.classes.get(className);
+        if (!classInfo) {
+            const suggestions = this.findSimilarNames(className, Array.from(analysis.classes.keys()));
+            return { exists: false, reason: `Class "${className}" not found.`, confidence: 'high', suggestions };
         }
 
-        const methodExists = classMethods.includes(methodName);
-        if(methodExists) {
-            const location = await this.findSymbolLocation(filePath, workspace, 'methods', methodName, className);
-            return { exists: true, location, confidence: 'high' };
+        const methodInfo = classInfo.methods.find(m => m.name === methodName);
+        if(methodInfo) {
+            return { exists: true, symbolInfo: methodInfo, confidence: 'high' };
         }
 
-        return { exists: false, reason: `Method "${methodName}" not found in class "${className}".`, confidence: 'high', suggestions: this.findSimilarNames(methodName, classMethods) };
+        const suggestions = this.findSimilarNames(methodName, classInfo.methods.map(m => m.name));
+        return { exists: false, reason: `Method "${methodName}" not found in class "${className}".`, confidence: 'high', suggestions };
     }
 
     public static async validateClass(filePath: string, className: string, workspace: vscode.WorkspaceFolder): Promise<TargetValidationResult> {
@@ -203,13 +224,13 @@ export class CodeAnalyzer {
             return { exists: false, reason: analysis.parseErrors?.[0] || 'File cannot be read or parsed', confidence: 'high' };
         }
         
-        const classExists = analysis.classes.has(className);
-        if (classExists) {
-            const location = await this.findSymbolLocation(filePath, workspace, 'classes', className);
-            return { exists: true, location, confidence: 'high' };
+        const classInfo = analysis.classes.get(className);
+        if (classInfo) {
+            return { exists: true, symbolInfo: classInfo, confidence: 'high' };
         }
         
-        return { exists: false, reason: `Class "${className}" not found.`, confidence: 'high', suggestions: this.findSimilarNames(className, Array.from(analysis.classes.keys())) };
+        const suggestions = this.findSimilarNames(className, Array.from(analysis.classes.keys()));
+        return { exists: false, reason: `Class "${className}" not found.`, confidence: 'high', suggestions };
     }
 
     public static async validateImport(filePath: string, importName: string, workspace: vscode.WorkspaceFolder): Promise<TargetValidationResult> {
@@ -218,26 +239,25 @@ export class CodeAnalyzer {
             return { exists: false, reason: analysis.parseErrors?.[0] || 'File cannot be read or parsed', confidence: 'high' };
         }
         
-        const importExists = analysis.imports.includes(importName);
-        if (importExists) {
-            const location = await this.findSymbolLocation(filePath, workspace, 'imports', importName);
-            return { exists: true, location, confidence: 'high' };
+        const imp = analysis.imports.find(i => i.name === importName);
+        if (imp) {
+            return { exists: true, symbolInfo: imp, confidence: 'high' };
         }
         
+        const suggestions = this.findSimilarNames(importName, analysis.imports.map(i => i.name));
         return { 
             exists: false, 
             reason: `Import "${importName}" not found.`, 
             confidence: 'high', 
-            suggestions: this.findSimilarNames(importName, analysis.imports) 
+            suggestions
         };
     }
     
-    // Helper methods like getLanguageFromFile, findSimilarNames, levenshteinDistance, etc.
+    // Helper methods (getLanguageFromFile, findSimilarNames, levenshteinDistance) remain unchanged.
     private static getLanguageFromFile(filePath: string): string {
         const ext = path.extname(filePath).toLowerCase();
         const languageMap: { [key:string]: string } = {
             '.js': 'javascript', '.ts': 'typescript', '.py': 'python', '.rs': 'rust'
-            // Add other supported languages
         };
         return languageMap[ext] || 'unknown';
     }
@@ -247,7 +267,7 @@ export class CodeAnalyzer {
             name: candidate,
             score: this.calculateSimilarity(target.toLowerCase(), candidate.toLowerCase())
         }))
-        .filter(item => item.score > 0.4) // At least 40% similarity
+        .filter(item => item.score > 0.4)
         .sort((a, b) => b.score - a.score)
         .slice(0, maxSuggestions);
         
