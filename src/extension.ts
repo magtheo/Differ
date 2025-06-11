@@ -15,6 +15,24 @@ interface PositionalChange extends ParsedChange {
     end: Position;
 }
 
+// Helper function to convert a 0-based offset to a 1-based line and column Position object
+function offsetToPosition(content: string, offset: number): Position {
+    if (offset < 0) offset = 0;
+    if (offset > content.length) offset = content.length;
+
+    let line = 1;
+    let lastNewlineIndex = -1;
+    for (let i = 0; i < offset; i++) {
+        if (content[i] === '\n') {
+            line++;
+            lastNewlineIndex = i;
+        }
+    }
+    // column is 1-based. It's the offset relative to the start of the current line.
+    const column = offset - lastNewlineIndex;
+    return { line, column, offset };
+}
+
 
 export async function activate(context: vscode.ExtensionContext) {
     console.log('🚀 Differ extension is now active!');
@@ -110,7 +128,7 @@ async function applyChanges(input: ParsedInput) {
     } catch (error) {
         const message = error instanceof Error ? error.message : 'Unknown error';
         vscode.window.showErrorMessage(`Failed to apply changes: ${message}`);
-        throw error;
+        throw error; // Re-throw to allow DifferProvider to catch and display it
     }
 }
 
@@ -129,7 +147,6 @@ async function applyChangesToFile(filePath: string, changes: ParsedChange[], wor
 
     const createFileChange = changes.find(c => c.action === 'create_file');
     if (createFileChange) {
-        // If creating a file, no other actions should be present for this file.
         if (changes.length > 1) {
             throw new Error(`Cannot perform other actions on a file being created in the same batch: ${filePath}`);
         }
@@ -139,7 +156,6 @@ async function applyChangesToFile(filePath: string, changes: ParsedChange[], wor
         return;
     }
 
-    // Read the original file content.
     let content: string;
     try {
         const fileData = await vscode.workspace.fs.readFile(fullPath);
@@ -148,13 +164,26 @@ async function applyChangesToFile(filePath: string, changes: ParsedChange[], wor
         throw new Error(`File ${filePath} does not exist. Use "create_file" action to create it.`);
     }
 
-    // --- Phase 1: Pre-computation Step ---
     const positionalChanges: PositionalChange[] = [];
     for (const change of changes) {
         let symbolInfo: SymbolInfo | undefined;
+        let fileAnalysisForAdditions: Awaited<ReturnType<typeof CodeAnalyzer.analyzeFile>> | undefined;
+
+        // Common logic for add actions needing file analysis
+        async function ensureFileAnalysis() {
+            if (!fileAnalysisForAdditions) {
+                fileAnalysisForAdditions = await CodeAnalyzer.analyzeFile(filePath, workspace);
+                if (!fileAnalysisForAdditions.isReadable || !fileAnalysisForAdditions.tree) {
+                    throw new Error(`Cannot analyze file ${filePath} to add new content.`);
+                }
+            }
+            return fileAnalysisForAdditions;
+        }
 
         switch(change.action) {
-            case 'replace_function': {
+            case 'replace_function':
+            case 'delete_function': // delete_function implies change.code will be ""
+            {
                 const result = await CodeAnalyzer.validateFunction(filePath, change.target, workspace);
                 if (result.exists && result.symbolInfo) symbolInfo = result.symbolInfo;
                 break;
@@ -168,24 +197,93 @@ async function applyChangesToFile(filePath: string, changes: ParsedChange[], wor
             case 'add_method': {
                  if (!change.class) throw new Error(`Action 'add_method' requires a CLASS for target '${change.target}'.`);
                  const result = await CodeAnalyzer.validateClass(filePath, change.class, workspace);
-                 if (result.exists && result.symbolInfo) {
+                 if (result.exists && result.symbolInfo && result.symbolInfo.end) { // Ensure end is defined
                     // We insert just before the closing brace of the class.
-                    const classBodyEndOffset = result.symbolInfo.end.offset - 1;
+                    // The offset from tree-sitter is exclusive, so end.offset is *after* the last char.
+                    const classBodyEndOffset = result.symbolInfo.end.offset - 1; // Point to the '}'
+                    if (classBodyEndOffset < 0) throw new Error('Class end offset is invalid.');
 
-                    // Determine indentation from the line before the class closing brace
-                    const lineStartOffset = content.lastIndexOf('\n', classBodyEndOffset) + 1;
-                    const previousLine = content.substring(lineStartOffset, classBodyEndOffset);
-                    const indentation = (previousLine.match(/^\s*/)?.[0] || '    ');
+
+                    const lineStartOffset = content.lastIndexOf('\n', classBodyEndOffset -1) + 1; // Line before the closing brace line
+                    const previousLine = content.substring(lineStartOffset, content.indexOf('\n', lineStartOffset));
+                    const indentation = (previousLine.match(/^\s*/)?.[0] || '    '); // Indent like previous line or default
                     const indentedCode = change.code.split('\n').map(line => indentation + line).join('\n');
 
                     symbolInfo = { 
-                        name: change.target,
-                        start: { ...result.symbolInfo.end, offset: classBodyEndOffset },
-                        end: { ...result.symbolInfo.end, offset: classBodyEndOffset },
+                        name: change.target, // Name of the method being added
+                        // Insert at the character position of the closing brace of the class
+                        start: offsetToPosition(content, classBodyEndOffset),
+                        end: offsetToPosition(content, classBodyEndOffset),
                     };
                     change.code = `\n${indentedCode}\n`; // Add newlines around the indented code
                  }
                  break;
+            }
+            case 'add_function':
+            case 'add_struct':
+            case 'add_enum':
+            {
+                const analysis = await ensureFileAnalysis();
+                let insertionOffset = analysis.content?.length || 0; // Default to end of file
+                const rootNode = analysis.tree?.rootNode;
+
+                if (rootNode && rootNode.namedChildren.length > 0) {
+                    const lastChild = rootNode.namedChildren[rootNode.namedChildren.length - 1];
+                    insertionOffset = lastChild.endIndex;
+                } else if (rootNode && rootNode.children.length > 0) {
+                     const lastChild = rootNode.children[rootNode.children.length -1];
+                     insertionOffset = lastChild.endIndex;
+                }
+
+                const insertionPointPosition = offsetToPosition(analysis.content || "", insertionOffset);
+                symbolInfo = {
+                    name: change.target,
+                    start: insertionPointPosition,
+                    end: insertionPointPosition,
+                };
+
+                let newCode = change.code;
+                if (analysis.content && analysis.content.length > 0) {
+                    if (insertionOffset > 0 && !analysis.content.substring(0, insertionOffset).endsWith('\n\n') && !analysis.content.substring(0, insertionOffset).endsWith('\n')) {
+                        newCode = '\n\n' + newCode; // Add two newlines if not already well-separated
+                    } else if (insertionOffset > 0 && !analysis.content.substring(0, insertionOffset).endsWith('\n')) {
+                         newCode = '\n' + newCode; // Add one newline
+                    }
+                }
+                change.code = newCode + '\n'; // Ensure a trailing newline
+                break;
+            }
+            case 'add_import': {
+                const analysis = await ensureFileAnalysis();
+                let insertionOffset = 0; // Default to start of file
+
+                if (analysis.imports.length > 0) {
+                    // analysis.imports contains SymbolInfo for imports.
+                    // Their .end.offset should point to the end of the full import statement.
+                    const lastImportSymbol = analysis.imports[analysis.imports.length - 1];
+                    insertionOffset = lastImportSymbol.end.offset;
+                }
+                // If no imports, insertionOffset remains 0 (top of the file).
+
+                const insertionPointPosition = offsetToPosition(analysis.content || "", insertionOffset);
+                symbolInfo = {
+                    name: change.target,
+                    start: insertionPointPosition,
+                    end: insertionPointPosition,
+                };
+
+                let newCode = change.code;
+                if (insertionOffset === 0) { // Inserting at the very top
+                    newCode = newCode + '\n';
+                    // If file has content and doesn't start with newline, add another for separation
+                    if (analysis.content && analysis.content.length > 0 && !analysis.content.startsWith('\n')) {
+                        newCode = newCode + '\n';
+                    }
+                } else { // Inserting after existing imports
+                    newCode = '\n' + newCode; // Start on a new line
+                }
+                change.code = newCode;
+                break;
             }
             case 'replace_block': {
                 const result = await CodeAnalyzer.validateBlock(filePath, change.target, workspace);
@@ -195,39 +293,45 @@ async function applyChangesToFile(filePath: string, changes: ParsedChange[], wor
             case 'insert_after': {
                 const result = await CodeAnalyzer.validateBlock(filePath, change.target, workspace);
                 if (result.exists && result.symbolInfo) {
-                    const eolIndex = content.indexOf('\n', result.symbolInfo.end.offset);
-                    const insertionPoint = eolIndex !== -1 ? eolIndex + 1 : content.length;
+                    // Insert at the end of the target block's actual content.
+                    const insertionPointOffset = result.symbolInfo.end.offset;
 
-                    const lineStartOffset = content.lastIndexOf('\n', result.symbolInfo.start.offset) + 1;
-                    const lineContentBeforeTarget = content.substring(lineStartOffset, result.symbolInfo.start.offset);
-                    const indentation = lineContentBeforeTarget.match(/^\s*/)?.[0] || '';
+                    // Determine indentation from the line where the target block starts or exists.
+                    const targetStartLineOffset = content.lastIndexOf('\n', result.symbolInfo.start.offset -1) + 1;
+                    const targetStartLineContent = content.substring(targetStartLineOffset, result.symbolInfo.start.offset);
+                    const indentation = targetStartLineContent.match(/^\s*/)?.[0] || '';
                     
                     const indentedCode = change.code.split('\n').map(line => indentation + line).join('\n');
 
                     symbolInfo = {
                         name: change.target,
-                        start: { ...result.symbolInfo.end, offset: insertionPoint },
-                        end: { ...result.symbolInfo.end, offset: insertionPoint },
+                        start: offsetToPosition(content, insertionPointOffset),
+                        end: offsetToPosition(content, insertionPointOffset),
                     };
-                    change.code = `${indentedCode}\n`;
+                    // Ensure the new code starts on a new line relative to the target block.
+                    change.code = `\n${indentedCode}`;
                 }
                 break;
             }
             case 'insert_before': {
                 const result = await CodeAnalyzer.validateBlock(filePath, change.target, workspace);
                 if (result.exists && result.symbolInfo) {
-                    const insertionPoint = content.lastIndexOf('\n', result.symbolInfo.start.offset - 1) + 1;
+                    // Insert at the beginning of the target block's actual content.
+                    const insertionPointOffset = result.symbolInfo.start.offset;
 
-                    const lineContentBeforeTarget = content.substring(insertionPoint, result.symbolInfo.start.offset);
-                    const indentation = lineContentBeforeTarget.match(/^\s*/)?.[0] || '';
+                    // Determine indentation from the line where the target block starts.
+                    const targetStartLineOffset = content.lastIndexOf('\n', result.symbolInfo.start.offset-1) + 1;
+                    const targetStartLineContent = content.substring(targetStartLineOffset, result.symbolInfo.start.offset);
+                    const indentation = targetStartLineContent.match(/^\s*/)?.[0] || '';
                     
                     const indentedCode = change.code.split('\n').map(line => indentation + line).join('\n');
 
                     symbolInfo = {
                         name: change.target,
-                        start: { ...result.symbolInfo.start, offset: insertionPoint },
-                        end: { ...result.symbolInfo.start, offset: insertionPoint },
+                        start: offsetToPosition(content, insertionPointOffset),
+                        end: offsetToPosition(content, insertionPointOffset),
                     };
+                    // Ensure the new code ends with a newline to separate from the target block.
                     change.code = `${indentedCode}\n`;
                 }
                 break;
@@ -237,12 +341,10 @@ async function applyChangesToFile(filePath: string, changes: ParsedChange[], wor
         if (symbolInfo) {
             positionalChanges.push({ ...change, start: symbolInfo.start, end: symbolInfo.end });
         } else {
-            throw new Error(`Could not find target for action '${change.action}' on '${change.target}' in file ${filePath}.`);
+            throw new Error(`Could not find target or determine insertion point for action '${change.action}' on '${change.target || change.description || 'unknown target'}' in file ${filePath}.`);
         }
     }
 
-    // --- Phase 2: Sort and Apply ---
-    // Sort changes in REVERSE order by start offset. This is critical.
     positionalChanges.sort((a, b) => b.start.offset - a.start.offset);
 
     let modifiedContent = content;
@@ -250,16 +352,12 @@ async function applyChangesToFile(filePath: string, changes: ParsedChange[], wor
         modifiedContent = applySingleChangeToContent(modifiedContent, change);
     }
 
-    // Write the fully modified content back to the file once.
     const writeData = Buffer.from(modifiedContent, 'utf8');
     await vscode.workspace.fs.writeFile(fullPath, writeData);
     console.log(`Applied ${changes.length} modifications to ${filePath}`);
 }
 
-/**
- * Applies a single, positionally-aware change to the file content.
- * This function no longer performs any searches.
- */
+
 function applySingleChangeToContent(content: string, change: PositionalChange): string {
     const { start, end, code, action } = change;
 
@@ -267,22 +365,20 @@ function applySingleChangeToContent(content: string, change: PositionalChange): 
         case 'replace_function':
         case 'replace_method':
         case 'replace_block':
-            // Replace the entire block from its start to its end.
+        case 'delete_function': // Handled by `code` being potentially empty
             return content.slice(0, start.offset) + code + content.slice(end.offset);
         
         case 'add_method':
+        case 'add_function':
+        case 'add_import':
+        case 'add_struct':
+        case 'add_enum':
         case 'insert_after':
         case 'insert_before':
-            // For insertion actions, start and end offsets are the same point.
-            // We replace a zero-length string at the start offset with the new code.
-            return content.slice(0, start.offset) + code + content.slice(start.offset);
-
-        // Add other actions here...
-        // case 'add_import':
-        // case 'add_function':
+            return content.slice(0, start.offset) + code + content.slice(start.offset); // Note: end.offset is same as start.offset for pure insertions
 
         default:
-            console.warn(`Unsupported positional action: ${action}`);
+            console.warn(`Unsupported positional action during content modification: ${action}`);
             return content;
     }
 }
