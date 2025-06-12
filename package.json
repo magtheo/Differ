@@ -174,21 +174,15 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
-    "compile-webview": "npm run compile && npm run copy-webview && npm run copy-grammars",
-    "copy-webview": "mkdir -p out/webview && cp -r src/webview/* out/webview/ 2>/dev/null || (mkdir -p out/webview && echo 'No webview files to copy')",
-    "copy-grammars": "mkdir -p out/grammars && cp -r grammars/*.wasm out/grammars/ 2>/dev/null || (mkdir -p out/grammars && echo 'No grammar files to copy')",
-    "clean": "rm -rf out/ node_modules/.cache",
-    "rebuild": "npm run clean && npm run compile-webview",
-    "pretest": "npm run compile && npm run lint",
-    "lint": "eslint src --ext .ts",
-    "test": "vscode-test",
-    "package": "vsce package",
-    "publish": "vsce publish",
-    "install:clean": "rm -rf node_modules package-lock.json && npm install"
-  },
+        "vscode:prepublish": "npm run build",
+        "build": "node ./esbuild.js && npm run copy-grammars",
+        "watch": "node ./esbuild.js --watch",
+        "copy-grammars": "mkdir -p out/grammars && cp -f grammars/*.wasm out/grammars/ && cp -f node_modules/web-tree-sitter/tree-sitter.wasm out/grammars/",
+        "clean": "rm -rf out/ node_modules/.cache",
+        "rebuild": "npm run clean && npm install && npm run build",
+        "package": "vsce package",
+        "publish": "vsce publish"
+    },
   "dependencies": {
     "web-tree-sitter": "^0.25.6"
   },
@@ -200,6 +194,7 @@
     "@typescript-eslint/parser": "^8.31.1",
     "@vscode/test-cli": "^0.0.10",
     "@vscode/test-electron": "^2.5.2",
+    "esbuild": "^0.25.5",
     "eslint": "^9.25.1",
     "typescript": "^5.8.3"
   },
