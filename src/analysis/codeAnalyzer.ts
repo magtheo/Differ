@@ -290,28 +290,43 @@ export class CodeAnalyzer {
     }
     
     /**
-     * Finds a syntax node that exactly matches the given text.
-     */
+     * Finds a syntax node that best matches the given text by finding the smallest
+     * node that contains the target text after normalizing whitespace.
+    */
     private static findNodeByText(tree: any, text: string): any | undefined {
-        let foundNode: any | undefined;
-        const targetTrimmed = text.trim();
+        // Normalize the target text by replacing all whitespace sequences (spaces, newlines, tabs) with a single space.
+        const targetNormalized = text.trim().replace(/\s+/g, ' ');
+        let bestMatch: any | undefined;
 
         function walk(node: any) {
-            if (foundNode) { 
-                return; 
+            // Also normalize the current node's text for comparison.
+            const nodeTextNormalized = node.text.trim().replace(/\s+/g, ' ');
+
+            // Check if the node's text contains the target text.
+            if (nodeTextNormalized.includes(targetNormalized)) {
+                // This node is a candidate. We want the smallest (tightest-fitting) one.
+                // If we haven't found a match yet, or if this node is smaller than the last one, it's our new best match.
+                if (!bestMatch || node.text.length < bestMatch.text.length) {
+                    bestMatch = node;
+                }
             }
 
-            if (node.text.trim() === targetTrimmed) {
-                foundNode = node;
-                return;
-            }
-
-            for (const child of node.namedChildren) {
+            // We must continue walking through all children to find the smallest possible container.
+            for (const child of node.children) {
                 walk(child);
             }
         }
+        
         walk(tree.rootNode);
-        return foundNode;
+        
+        // As a safeguard, ensure the found match isn't excessively larger than the target.
+        // This prevents matching the entire file if no good match is found.
+        if (bestMatch && bestMatch.text.length > text.length * 2 + 200) {
+            console.warn('Found a matching node, but it was much larger than the target. Discarding it as a likely incorrect match.');
+            return undefined;
+        }
+
+        return bestMatch;
     }
 
     // Helper methods (getLanguageFromFile, findSimilarNames, levenshteinDistance) remain unchanged.
