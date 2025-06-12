@@ -44,6 +44,11 @@
     "onStartupFinished"
   ],
   "main": "./out/extension.js",
+  "files": [
+    "out/**/*",
+    "grammars/**/*.wasm",
+    "images/**/*"
+  ],
   "contributes": {
     "commands": [
       {
@@ -162,10 +167,6 @@
           "group": "1_help@2"
         },
         {
-          "type": "separator",
-          "group": "2_separator"
-        },
-        {
           "command": "differ.view.toggleQuickStart",
           "group": "3_actions@1"
         }
@@ -188,6 +189,9 @@
     "publish": "vsce publish",
     "install:clean": "rm -rf node_modules package-lock.json && npm install"
   },
+  "dependencies": {
+    "web-tree-sitter": "^0.25.6"
+  },
   "devDependencies": {
     "@types/mocha": "^10.0.10",
     "@types/node": "20.x",
@@ -198,14 +202,6 @@
     "@vscode/test-electron": "^2.5.2",
     "eslint": "^9.25.1",
     "typescript": "^5.8.3"
-  },
-  "dependencies": {
-    "tree-sitter": "^0.25.0",
-    "tree-sitter-javascript": "^0.23.1",
-    "tree-sitter-python": "^0.23.6",
-    "tree-sitter-rust": "^0.24.0",
-    "tree-sitter-typescript": "^0.23.2",
-    "web-tree-sitter": "^0.25.6"
   },
   "extensionDependencies": [],
   "__metadata": {
