@@ -38,7 +38,15 @@ export async function activate(context: vscode.ExtensionContext) {
     console.log('🚀 Differ extension is now active!');
     
     // Initialize the CodeAnalyzer with the TreeSitterService
-    await CodeAnalyzer.initialize(context);
+    try {
+        console.log('🔄 Initializing CodeAnalyzer...');
+        await CodeAnalyzer.initialize(context);
+        console.log('✅ CodeAnalyzer initialized successfully');
+    } catch (error) {
+        console.error('❌ Failed to initialize CodeAnalyzer:', error);
+        vscode.window.showWarningMessage('Differ: Code analysis features may not work properly. Check the output panel for details.');
+        // Continue with extension activation even if TreeSitter fails
+    }
 
     // Create and register the webview provider
     const provider = new DifferProvider(context.extensionUri, context);

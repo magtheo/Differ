@@ -1,6 +1,5 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import Parser from 'tree-sitter';
 import { TreeSitterService } from './treeSitterService';
 
 // --- NEW/UPDATED INTERFACES FOR POSITIONAL DATA ---
@@ -55,7 +54,7 @@ export interface FileAnalysisResult {
     imports: SymbolInfo[];
     lineCount: number;
     parseErrors?: string[];
-    tree?: Parser.Tree;
+    tree?: any; // Tree from web-tree-sitter
 }
 
 export class CodeAnalyzer {
@@ -130,7 +129,7 @@ export class CodeAnalyzer {
     /**
      * A generic method to extract symbols based on a query. It now returns full SymbolInfo.
      */
-    private static extractSymbols(tree: Parser.Tree, language: string, queryType: 'functions' | 'classes' | 'imports' | 'methods', contextNode?: Parser.SyntaxNode): SymbolInfo[] {
+    private static extractSymbols(tree: any, language: string, queryType: 'functions' | 'classes' | 'imports' | 'methods', contextNode?: any): SymbolInfo[] {
         const captures = this._treeSitterService.query(tree, language, queryType);
         const symbols: SymbolInfo[] = [];
 
@@ -163,7 +162,7 @@ export class CodeAnalyzer {
         return symbols;
     }
 
-    private static extractClassesWithMethods(tree: Parser.Tree, language: string): Map<string, ClassInfo> {
+    private static extractClassesWithMethods(tree: any, language: string): Map<string, ClassInfo> {
         const classMap = new Map<string, ClassInfo>();
         const classSymbols = this.extractSymbols(tree, language, 'classes');
 
@@ -293,12 +292,14 @@ export class CodeAnalyzer {
     /**
      * Finds a syntax node that exactly matches the given text.
      */
-    private static findNodeByText(tree: Parser.Tree, text: string): Parser.SyntaxNode | undefined {
-        let foundNode: Parser.SyntaxNode | undefined;
+    private static findNodeByText(tree: any, text: string): any | undefined {
+        let foundNode: any | undefined;
         const targetTrimmed = text.trim();
 
-        function walk(node: Parser.SyntaxNode) {
-            if (foundNode) { return; }
+        function walk(node: any) {
+            if (foundNode) { 
+                return; 
+            }
 
             if (node.text.trim() === targetTrimmed) {
                 foundNode = node;
