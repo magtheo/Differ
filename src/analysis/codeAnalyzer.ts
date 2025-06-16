@@ -264,8 +264,18 @@ export class CodeAnalyzer {
         const node = this.findNodeByText(analysis.tree, targetText);
         
         if (node) {
+            // ADD THIS DEBUGGING
+            console.log('🔍 Found node:', {
+                type: node.type,
+                text: node.text,
+                startIndex: node.startIndex,
+                endIndex: node.endIndex,
+                startPosition: node.startPosition,
+                endPosition: node.endPosition
+            });
+            
             const symbolInfo: SymbolInfo = {
-                name: targetText.substring(0, 50) + '...', // Use a snippet as the "name"
+                name: targetText.substring(0, 50) + '...',
                 start: {
                     line: node.startPosition.row + 1,
                     column: node.startPosition.column + 1,
@@ -280,6 +290,7 @@ export class CodeAnalyzer {
             return { exists: true, symbolInfo: symbolInfo, confidence: 'medium' };
         }
         
+        
         const suggestions = this.findSimilarText(targetText, analysis.content || '');
         return { 
             exists: false, 
@@ -288,45 +299,101 @@ export class CodeAnalyzer {
             suggestions
         };
     }
+
     
     /**
-     * Finds a syntax node that best matches the given text by finding the smallest
-     * node that contains the target text after normalizing whitespace.
-    */
+     * Improved method to find a syntax node that matches the given text.
+     * This version better handles enum blocks and other structured code.
+     */
     private static findNodeByText(tree: any, text: string): any | undefined {
-        // Normalize the target text by replacing all whitespace sequences (spaces, newlines, tabs) with a single space.
-        const targetNormalized = text.trim().replace(/\s+/g, ' ');
+        // First, try to find by exact text match
+        let bestMatch = this.findExactTextMatch(tree, text);
+        if (bestMatch) {
+            return bestMatch;
+        }
+
+        // If no exact match, try to find by structural pattern
+        bestMatch = this.findStructuralMatch(tree, text);
+        if (bestMatch) {
+            return bestMatch;
+        }
+
+        // Fallback to the original fuzzy matching
+        return this.findFuzzyTextMatch(tree, text);
+    }
+
+    /**
+     * Find node with exact text content match
+    */
+    private static findExactTextMatch(tree: any, targetText: string): any | undefined {
+        const normalizedTarget = this.normalizeCode(targetText);
         let bestMatch: any | undefined;
 
-        function walk(node: any) {
-            // Also normalize the current node's text for comparison.
-            const nodeTextNormalized = node.text.trim().replace(/\s+/g, ' ');
+        // Use arrow function to preserve 'this' context
+        const walk = (node: any): void => {
+            const normalizedNodeText = this.normalizeCode(node.text);
+            
+            if (normalizedNodeText === normalizedTarget) {
+                if (!bestMatch || node.text.length < bestMatch.text.length) {
+                    bestMatch = node;
+                }
+            }
+            
+            for (const child of node.children) {
+                walk(child);
+            }
+        };
+        
+        walk(tree.rootNode);
+        return bestMatch;
+    }
 
-            // Check if the node's text contains the target text.
+
+    /**
+     * Fallback fuzzy matching (original implementation)
+     */
+    private static findFuzzyTextMatch(tree: any, text: string): any | undefined {
+        const targetNormalized = this.normalizeCode(text);
+        let bestMatch: any | undefined;
+
+        // Use arrow function to preserve context
+        const walk = (node: any): void => {
+            const nodeTextNormalized = this.normalizeCode(node.text);
+
             if (nodeTextNormalized.includes(targetNormalized)) {
-                // This node is a candidate. We want the smallest (tightest-fitting) one.
-                // If we haven't found a match yet, or if this node is smaller than the last one, it's our new best match.
                 if (!bestMatch || node.text.length < bestMatch.text.length) {
                     bestMatch = node;
                 }
             }
 
-            // We must continue walking through all children to find the smallest possible container.
             for (const child of node.children) {
                 walk(child);
             }
-        }
+        };
         
         walk(tree.rootNode);
         
-        // As a safeguard, ensure the found match isn't excessively larger than the target.
-        // This prevents matching the entire file if no good match is found.
-        if (bestMatch && bestMatch.text.length > text.length * 2 + 200) {
+        if (bestMatch && bestMatch.text.length > text.length * 3) {
             console.warn('Found a matching node, but it was much larger than the target. Discarding it as a likely incorrect match.');
             return undefined;
         }
 
         return bestMatch;
+    }
+
+
+    /**
+     * Normalize code for comparison by removing extra whitespace and formatting
+     */
+    private static normalizeCode(code: string): string {
+        return code
+            .replace(/\s+/g, ' ')           // Replace all whitespace with single spaces
+            .replace(/\s*{\s*/g, '{')       // Remove spaces around opening braces
+            .replace(/\s*}\s*/g, '}')       // Remove spaces around closing braces
+            .replace(/\s*;\s*/g, ';')       // Remove spaces around semicolons
+            .replace(/\s*,\s*/g, ',')       // Remove spaces around commas
+            .replace(/\s*=\s*/g, '=')       // Remove spaces around equals
+            .trim();
     }
 
     // Helper methods (getLanguageFromFile, findSimilarNames, levenshteinDistance) remain unchanged.
@@ -349,7 +416,134 @@ export class CodeAnalyzer {
         
         return similarities.map(item => item.name);
     }
-    
+
+    /**
+     * Find node by structural pattern (e.g., enum declarations, class definitions)
+     */
+    private static findStructuralMatch(tree: any, targetText: string): any | undefined {
+        // Look for enum pattern specifically
+        if (targetText.includes('export enum')) {
+            return this.findEnumDeclaration(tree, targetText);
+        }
+        
+        // Look for class pattern
+        if (targetText.includes('export class') || targetText.includes('class ')) {
+            return this.findClassDeclaration(tree, targetText);
+        }
+        
+        // Look for function pattern
+        if (targetText.includes('function ') || targetText.includes('export function')) {
+            return this.findFunctionDeclaration(tree, targetText);
+        }
+        
+        return undefined;
+    }
+
+    /**
+     * Find function declaration by name
+     */
+    private static findFunctionDeclaration(tree: any, targetText: string): any | undefined {
+        const functionNameMatch = targetText.match(/function\s+(\w+)/);
+        if (!functionNameMatch) {
+            return undefined;
+        }
+        
+        const functionName = functionNameMatch[1];
+        
+        function walk(node: any): any | undefined {
+            if (node.type === 'function_declaration') {
+                for (const child of node.children) {
+                    if (child.type === 'identifier' && child.text === functionName) {
+                        return node;
+                    }
+                }
+            }
+            
+            for (const child of node.children) {
+                const result = walk(child);
+                if (result) {
+                    return result;
+                }
+            }
+            
+            return undefined;
+        }
+        
+        return walk(tree.rootNode);
+    }
+
+    /**
+     * Find class declaration by name
+     */
+    private static findClassDeclaration(tree: any, targetText: string): any | undefined {
+        const classNameMatch = targetText.match(/class\s+(\w+)/);
+        if (!classNameMatch) {
+            return undefined;
+        }
+        
+        const className = classNameMatch[1];
+        
+        function walk(node: any): any | undefined {
+            if (node.type === 'class_declaration') {
+                for (const child of node.children) {
+                    if (child.type === 'identifier' && child.text === className) {
+                        return node;
+                    }
+                }
+            }
+            
+            for (const child of node.children) {
+                const result = walk(child);
+                if (result) {
+                    return result;
+                }
+            }
+            
+            return undefined;
+        }
+        
+        return walk(tree.rootNode);
+    }
+
+
+    /**
+     * Find enum declaration by name and structure
+     */
+    private static findEnumDeclaration(tree: any, targetText: string): any | undefined {
+        // Extract enum name from target text
+        const enumNameMatch = targetText.match(/enum\s+(\w+)/);
+        if (!enumNameMatch) {
+            return undefined;
+        }
+        
+        const enumName = enumNameMatch[1];
+        
+        function walk(node: any): any | undefined {
+            // Look for enum_declaration nodes
+            if (node.type === 'enum_declaration') {
+                // Find the identifier child node
+                for (const child of node.children) {
+                    if (child.type === 'identifier' && child.text === enumName) {
+                        return node; // Return the entire enum declaration
+                    }
+                }
+            }
+            
+            // Continue walking if this isn't the right enum
+            for (const child of node.children) {
+                const result = walk(child);
+                if (result) {
+                    return result;
+                }
+            }
+            
+            return undefined;
+        }
+        
+        return walk(tree.rootNode);
+    }
+
+        
     /**
      * Finds lines in content that are similar to the target text snippet.
      */
