@@ -2,7 +2,7 @@
   "name": "differ",
   "displayName": "Differ",
   "description": "Apply LLM-generated code changes safely with preview and rollback capabilities",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "publisher": "magtheo",
   "author": {
     "name": "Theo",
@@ -176,6 +176,7 @@
   "scripts": {
     "vscode:prepublish": "npm run build",
     "build": "node ./esbuild.js && npm run copy-webview && npm run copy-grammars",
+    "compile-webview": "npm run build",
     "watch": "node ./esbuild.js --watch",
     "copy-webview": "mkdir -p out/webview && cp -r src/webview/* out/webview/ 2>/dev/null || (mkdir -p out/webview && echo 'Webview files copied')",
     "copy-grammars": "mkdir -p out/grammars && cp -f grammars/*.wasm out/grammars/ && cp -f node_modules/web-tree-sitter/tree-sitter.wasm out/grammars/",
