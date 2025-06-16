@@ -256,23 +256,73 @@ export class CodeAnalyzer {
      * Validates if a specific block of text exists as a distinct AST node.
      */
     public static async validateBlock(filePath: string, targetText: string, workspace: vscode.WorkspaceFolder): Promise<TargetValidationResult> {
+        console.log('🔍 VALIDATE BLOCK START:', filePath);
+        console.log('🔍 Target text length:', targetText.length);
+        console.log('🔍 Target text:', targetText.substring(0, 100));
+        
         const analysis = await this.analyzeFile(filePath, workspace);
         if (!analysis.isReadable || !analysis.tree) {
+            console.log('❌ File not readable or no tree');
             return { exists: false, reason: analysis.parseErrors?.[0] || 'File cannot be read or parsed', confidence: 'high' };
+        }
+        
+        console.log('✅ File analysis complete, looking for node...');
+        
+        // First, let's see if we can find it manually for comparison
+        const fileContent = analysis.content || '';
+        const manualIndex = fileContent.indexOf(targetText.trim());
+        if (manualIndex >= 0) {
+            console.log('✅ Target found manually at index:', manualIndex);
+            console.log('📍 Manual context:', fileContent.substring(Math.max(0, manualIndex - 20), manualIndex + targetText.length + 20));
+        } else {
+            console.log('❌ Target NOT found manually');
+            
+            // If it's an enum, let's see if we can find it without the export keyword
+            if (targetText.includes('enum ')) {
+                const enumNameMatch = targetText.match(/enum\s+(\w+)/);
+                if (enumNameMatch) {
+                    const enumName = enumNameMatch[1];
+                    const enumOnlyPattern = `enum ${enumName}`;
+                    const enumIndex = fileContent.indexOf(enumOnlyPattern);
+                    console.log(`🔍 Looking for just "${enumOnlyPattern}":`, enumIndex >= 0 ? `Found at ${enumIndex}` : 'Not found');
+                }
+            }
         }
         
         const node = this.findNodeByText(analysis.tree, targetText);
         
         if (node) {
-            // ADD THIS DEBUGGING
-            console.log('🔍 Found node:', {
-                type: node.type,
-                text: node.text,
-                startIndex: node.startIndex,
-                endIndex: node.endIndex,
-                startPosition: node.startPosition,
-                endPosition: node.endPosition
-            });
+            console.log('✅ NODE FOUND!');
+            console.log('   Type:', node.type);
+            console.log('   Start:', node.startIndex);
+            console.log('   End:', node.endIndex);
+            console.log('   Text length:', node.text.length);
+            
+            // CRITICAL: Let's see what content is actually at these positions
+            const actualContent = fileContent.substring(node.startIndex, node.endIndex);
+            console.log('📄 ACTUAL CONTENT FROM NODE:');
+            console.log('---START---');
+            console.log(actualContent);
+            console.log('---END---');
+            
+            console.log('📄 TARGET CONTENT:');
+            console.log('---START---'); 
+            console.log(targetText);
+            console.log('---END---');
+            
+            // Validate that the node content actually matches what we're looking for
+            const normalizedActual = actualContent.trim();
+            const normalizedTarget = targetText.trim();
+            
+            if (normalizedActual === normalizedTarget) {
+                console.log('✅ PERFECT MATCH - Content matches exactly');
+            } else if (normalizedActual.includes(normalizedTarget.replace('export ', ''))) {
+                console.log('⚠️ PARTIAL MATCH - Found enum but missing export keyword');
+            } else {
+                console.log('❌ CONTENT MISMATCH - Node content does not match target');
+                console.log('   Actual length:', normalizedActual.length);
+                console.log('   Target length:', normalizedTarget.length);
+            }
             
             const symbolInfo: SymbolInfo = {
                 name: targetText.substring(0, 50) + '...',
@@ -287,11 +337,12 @@ export class CodeAnalyzer {
                     offset: node.endIndex
                 }
             };
+            
             return { exists: true, symbolInfo: symbolInfo, confidence: 'medium' };
         }
         
-        
-        const suggestions = this.findSimilarText(targetText, analysis.content || '');
+        console.log('❌ No node found');
+        const suggestions = this.findSimilarText(targetText, fileContent);
         return { 
             exists: false, 
             reason: `Code block starting with "${targetText.substring(0, 30)}..." not found as a distinct syntax node.`, 
@@ -299,27 +350,63 @@ export class CodeAnalyzer {
             suggestions
         };
     }
-
     
     /**
      * Improved method to find a syntax node that matches the given text.
      * This version better handles enum blocks and other structured code.
      */
     private static findNodeByText(tree: any, text: string): any | undefined {
-        // First, try to find by exact text match
-        let bestMatch = this.findExactTextMatch(tree, text);
+        console.log('🔍 FIND NODE BY TEXT CALLED');
+        console.log('   Text length:', text.length);
+        console.log('   Text preview:', text.substring(0, 100));
+        
+        // First, try to find by structural pattern (most reliable)
+        console.log('🏗️ Trying structural pattern match...');
+        let bestMatch = this.findStructuralMatch(tree, text);
         if (bestMatch) {
+            console.log('✅ STRUCTURAL MATCH FOUND:', bestMatch.type, bestMatch.startIndex, bestMatch.endIndex);
             return bestMatch;
         }
+        console.log('❌ No structural match found');
 
-        // If no exact match, try to find by structural pattern
-        bestMatch = this.findStructuralMatch(tree, text);
+        // If no structural match, try exact text match
+        console.log('🎯 Trying exact text match...');
+        bestMatch = this.findExactTextMatch(tree, text);
         if (bestMatch) {
+            console.log('✅ EXACT TEXT MATCH FOUND:', bestMatch.type, bestMatch.startIndex, bestMatch.endIndex);
             return bestMatch;
         }
+        console.log('❌ No exact text match found');
 
-        // Fallback to the original fuzzy matching
-        return this.findFuzzyTextMatch(tree, text);
+        // Fallback to fuzzy matching (least reliable)
+        console.log('🔍 Trying fuzzy text match...');
+        bestMatch = this.findFuzzyTextMatch(tree, text);
+        if (bestMatch) {
+            console.log('⚠️ FUZZY MATCH FOUND:', bestMatch.type, bestMatch.startIndex, bestMatch.endIndex);
+            
+            // Additional validation for fuzzy matches
+            const nodeText = bestMatch.text;
+            const normalizedTarget = this.normalizeCode(text);
+            const normalizedNode = this.normalizeCode(nodeText);
+            
+            console.log('🔍 Fuzzy match validation:');
+            console.log('   Node text length:', nodeText.length);
+            console.log('   Target text length:', text.length);
+            console.log('   Normalized node length:', normalizedNode.length);
+            console.log('   Normalized target length:', normalizedTarget.length);
+            
+            // Check if the fuzzy match is actually reasonable
+            if (normalizedNode.includes(normalizedTarget) && nodeText.length < text.length * 3) {
+                console.log('✅ Fuzzy match accepted');
+                return bestMatch;
+            } else {
+                console.log('🚫 Fuzzy match rejected as too different from target');
+                return undefined;
+            }
+        }
+        
+        console.log('❌ NO MATCH FOUND AT ALL');
+        return undefined;
     }
 
     /**
@@ -421,21 +508,27 @@ export class CodeAnalyzer {
      * Find node by structural pattern (e.g., enum declarations, class definitions)
      */
     private static findStructuralMatch(tree: any, targetText: string): any | undefined {
-        // Look for enum pattern specifically
-        if (targetText.includes('export enum')) {
+        console.log('🔍 Looking for structural match for:', targetText.substring(0, 50));
+        
+        // Check if target is an enum declaration
+        if (targetText.includes('enum ')) {
+            console.log('🎯 Target appears to be an enum, using enum-specific search');
             return this.findEnumDeclaration(tree, targetText);
         }
         
-        // Look for class pattern
-        if (targetText.includes('export class') || targetText.includes('class ')) {
-            return this.findClassDeclaration(tree, targetText);
-        }
-        
-        // Look for function pattern
-        if (targetText.includes('function ') || targetText.includes('export function')) {
+        // Check if target is a function
+        if (targetText.includes('function ') || targetText.match(/^\s*(async\s+)?function\s+\w+/)) {
+            console.log('🎯 Target appears to be a function, using function-specific search');
             return this.findFunctionDeclaration(tree, targetText);
         }
         
+        // Check if target is a class method
+        if (targetText.match(/^\s*(public|private|protected|static|\w+)\s*\(/)) {
+            console.log('🎯 Target appears to be a method, using method-specific search');
+            // You would implement findMethodDeclaration here
+        }
+        
+        console.log('❌ No specific structural pattern detected');
         return undefined;
     }
 
@@ -510,28 +603,74 @@ export class CodeAnalyzer {
      * Find enum declaration by name and structure
      */
     private static findEnumDeclaration(tree: any, targetText: string): any | undefined {
+        console.log('🏗️ FIND ENUM DECLARATION CALLED');
+        
         // Extract enum name from target text
         const enumNameMatch = targetText.match(/enum\s+(\w+)/);
         if (!enumNameMatch) {
+            console.log('❌ No enum name found in target text');
             return undefined;
         }
         
         const enumName = enumNameMatch[1];
+        console.log('🎯 Looking for enum:', enumName);
+        console.log('🎯 Target text starts with export?', targetText.trim().startsWith('export'));
         
-        function walk(node: any): any | undefined {
-            // Look for enum_declaration nodes
-            if (node.type === 'enum_declaration') {
-                // Find the identifier child node
+        function walk(node: any, depth: number = 0): any | undefined {
+            const indent = '  '.repeat(depth);
+            
+            // Check if this is an export_statement containing an enum
+            if (node.type === 'export_statement') {
+                console.log(`${indent}📤 Found export_statement at depth ${depth}`);
+                console.log(`${indent}   startIndex: ${node.startIndex}`);
+                console.log(`${indent}   endIndex: ${node.endIndex}`);
+                console.log(`${indent}   text preview: ${node.text.substring(0, 100)}...`);
+                
+                // Look for enum_declaration within the export_statement
                 for (const child of node.children) {
-                    if (child.type === 'identifier' && child.text === enumName) {
-                        return node; // Return the entire enum declaration
+                    if (child.type === 'enum_declaration') {
+                        console.log(`${indent}   📋 Found enum_declaration inside export_statement`);
+                        
+                        // Check if this enum has the right name
+                        for (const enumChild of child.children) {
+                            if (enumChild.type === 'identifier' && enumChild.text === enumName) {
+                                console.log(`${indent}   ✅ EXPORTED ENUM NAME MATCH FOUND!`);
+                                console.log(`${indent}   Returning export_statement (full declaration) with:`);
+                                console.log(`${indent}     startIndex: ${node.startIndex}`);
+                                console.log(`${indent}     endIndex: ${node.endIndex}`);
+                                console.log(`${indent}     full text: ${node.text}`);
+                                return node; // Return the entire export_statement, not just the enum
+                            }
+                        }
                     }
                 }
             }
             
-            // Continue walking if this isn't the right enum
+            // Also check for standalone enum declarations (non-exported)
+            if (node.type === 'enum_declaration') {
+                console.log(`${indent}📋 Found standalone enum_declaration at depth ${depth}`);
+                console.log(`${indent}   startIndex: ${node.startIndex}`);
+                console.log(`${indent}   endIndex: ${node.endIndex}`);
+                console.log(`${indent}   text preview: ${node.text.substring(0, 100)}...`);
+                
+                // Check children for identifier
+                for (const child of node.children) {
+                    if (child.type === 'identifier' && child.text === enumName) {
+                        console.log(`${indent}   ✅ STANDALONE ENUM NAME MATCH FOUND!`);
+                        // Only return this if the target doesn't start with 'export'
+                        if (!targetText.trim().startsWith('export')) {
+                            console.log(`${indent}   Returning standalone enum node`);
+                            return node;
+                        } else {
+                            console.log(`${indent}   ❌ Target expects export but this is standalone, skipping`);
+                        }
+                    }
+                }
+            }
+            
+            // Continue walking
             for (const child of node.children) {
-                const result = walk(child);
+                const result = walk(child, depth + 1);
                 if (result) {
                     return result;
                 }
@@ -540,8 +679,18 @@ export class CodeAnalyzer {
             return undefined;
         }
         
-        return walk(tree.rootNode);
+        const result = walk(tree.rootNode);
+        if (result) {
+            console.log('✅ ENUM DECLARATION FOUND AND RETURNED');
+            console.log('   Node type:', result.type);
+            console.log('   Includes export?', result.type === 'export_statement');
+        } else {
+            console.log('❌ ENUM DECLARATION NOT FOUND');
+        }
+        
+        return result;
     }
+
 
         
     /**

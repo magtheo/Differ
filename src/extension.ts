@@ -3,6 +3,7 @@ import * as vscode from 'vscode';
 import { ChangeParser, ParsedInput, ParsedChange } from './parser/inputParser';
 import { DifferProvider } from './ui/webViewProvider';
 import { CodeAnalyzer, Position, SymbolInfo } from './analysis/codeAnalyzer';
+import { getPreviewFileSystemProvider } from './utils/previewFileSystemProvider';
 
 // Store the provider instance to be accessible by command handlers
 let differProviderInstance: DifferProvider | undefined;
@@ -55,6 +56,17 @@ export async function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
         vscode.window.registerWebviewViewProvider(DifferProvider.viewType, provider)
     );
+
+    // Register the preview file system provider
+    const previewProvider = getPreviewFileSystemProvider();
+    const previewProviderDisposable = vscode.workspace.registerFileSystemProvider('differ-preview', previewProvider, { 
+        isCaseSensitive: true,
+        isReadonly: false // Allow writes for creating preview files
+    });
+    
+    console.log('📁 Registered differ-preview file system provider');
+    context.subscriptions.push(previewProviderDisposable);
+
 
     // Register commands. All interaction logic is now initiated from the webview.
     const commands = [
@@ -367,27 +379,65 @@ async function applyChangesToFile(filePath: string, changes: ParsedChange[], wor
 
 
 function applySingleChangeToContent(content: string, change: PositionalChange): string {
-    const { start, end, code, action } = change;
-
-    switch (action) {
+    console.log('🔧 ===========================');
+    console.log('🔧 APPLYING CHANGE TO CONTENT');
+    console.log('🔧 Action:', change.action);
+    console.log('🔧 Target:', change.target.substring(0, 50));
+    console.log('🔧 Start offset:', change.start.offset);
+    console.log('🔧 End offset:', change.end.offset);
+    console.log('🔧 Content length:', content.length);
+    console.log('🔧 Replacement length:', change.code.length);
+    console.log('🔧 ===========================');
+    
+    // Validate offsets
+    if (change.start.offset < 0 || change.end.offset > content.length || change.start.offset > change.end.offset) {
+        console.error('❌ INVALID OFFSETS!');
+        console.error('   Start:', change.start.offset);
+        console.error('   End:', change.end.offset);
+        console.error('   Content length:', content.length);
+        throw new Error(`Invalid offsets: start=${change.start.offset}, end=${change.end.offset}, contentLength=${content.length}`);
+    }
+    
+    // Extract the content that will be replaced for debugging
+    const contentToReplace = content.slice(change.start.offset, change.end.offset);
+    console.log('📝 CONTENT BEING REPLACED:');
+    console.log('---START ORIGINAL---');
+    console.log(contentToReplace);
+    console.log('---END ORIGINAL---');
+    
+    console.log('📝 REPLACEMENT CONTENT:');
+    console.log('---START REPLACEMENT---');
+    console.log(change.code);
+    console.log('---END REPLACEMENT---');
+    
+    switch (change.action) {
         case 'replace_function':
         case 'replace_method':
         case 'replace_block':
-        case 'delete_function': // Handled by `code` being potentially empty
-            return content.slice(0, start.offset) + code + content.slice(end.offset);
+        case 'delete_function':
+            const before = content.slice(0, change.start.offset);
+            const after = content.slice(change.end.offset);
+            const result = before + change.code + after;
+            
+            console.log('✅ REPLACEMENT OPERATION COMPLETE');
+            console.log('   Before length:', before.length);
+            console.log('   Replacement length:', change.code.length);
+            console.log('   After length:', after.length);
+            console.log('   Result length:', result.length);
+            
+            // Show some context around the change
+            const contextStart = Math.max(0, change.start.offset - 50);
+            const contextEnd = Math.min(result.length, change.start.offset + change.code.length + 50);
+            console.log('📋 RESULT CONTEXT:');
+            console.log('---START CONTEXT---');
+            console.log(result.substring(contextStart, contextEnd));
+            console.log('---END CONTEXT---');
+            
+            return result;
         
-        case 'add_method':
-        case 'add_function':
-        case 'add_import':
-        case 'add_struct':
-        case 'add_enum':
-        case 'insert_after':
-        case 'insert_before':
-            return content.slice(0, start.offset) + code + content.slice(start.offset); // Note: end.offset is same as start.offset for pure insertions
-
         default:
-            console.warn(`Unsupported positional action during content modification: ${action}`);
-            return content;
+            // Handle other actions...
+            return content.slice(0, change.start.offset) + change.code + content.slice(change.start.offset);
     }
 }
 

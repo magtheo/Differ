@@ -6,6 +6,8 @@ import { ChangeParser, ParsedInput, ParsedChange, ValidationError, ValidationWar
 // import { ValidationEngine, ValidationSummary } from '../validation/validationEngine';
 // import { ErrorReporter } from '../validation/errorReporter';
 import { Logger } from '../utils/logger';
+import { CodeAnalyzer, SymbolInfo } from '../analysis/codeAnalyzer';
+import { getPreviewFileSystemProvider } from '../utils/previewFileSystemProvider';
 
 export class DifferProvider implements vscode.WebviewViewProvider {
     public static readonly viewType = 'differ-panel';
@@ -338,7 +340,6 @@ export class DifferProvider implements vscode.WebviewViewProvider {
         }
     }
     
-    // _handlePreviewChange, _previewFileModification, _previewNewFile remain the same
     private async _handlePreviewChange(data: { changeId: string }) {
         this._logger.info('Handling previewChange message', { changeId: data.changeId });
         const change = this._stateManager.getState().pendingChanges.find(c => c.id === data.changeId);
@@ -398,50 +399,173 @@ export class DifferProvider implements vscode.WebviewViewProvider {
     }
 
     private async _previewFileModification(change: PendingChange, originalDocument: vscode.TextDocument) {
+        console.log('🎬 ===========================');
+        console.log('🎬 PREVIEW FILE MODIFICATION');
+        console.log('🎬 Action:', change.action);
+        console.log('🎬 Target:', change.target?.substring(0, 100) || 'No target');
+        console.log('🎬 ===========================');
+
         const originalContent = originalDocument.getText();
         let modifiedContent = originalContent;
         let unableToPreviewReason: string | null = null;
-        const EOL = originalDocument.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n';
 
-        // Simplified preview logic based on action (more robust parsing needed for accuracy)
-        if (change.action.toLowerCase().includes('replace')) {
-            if (change.target && change.target.length > 0) {
+        try {
+            // Get workspace and validate using Tree-sitter (same as application)
+            const workspaceFolders = vscode.workspace.workspaceFolders;
+            if (!workspaceFolders || workspaceFolders.length === 0) {
+                unableToPreviewReason = 'No workspace folder found for Tree-sitter validation';
+            } else {
+                const workspace = workspaceFolders[0];
+                const relativePath = vscode.workspace.asRelativePath(originalDocument.uri, false);
+                
+                console.log('🎬 PREVIEW: Using Tree-sitter validation for:', relativePath);
+                
+                // Use the same validation helper
+                const validation = await this._validateChangeUsingTreeSitter(change, relativePath, workspace);
+                
+                if (validation.symbolInfo) {
+                    console.log('🎬 PREVIEW: Tree-sitter validation successful');
+                    console.log('🎬 PREVIEW: Found symbol at offset', validation.symbolInfo.start.offset, '-', validation.symbolInfo.end.offset);
+                    
+                    // Apply the EXACT same replacement logic as applySingleChangeToContent
+                    const symbolInfo = validation.symbolInfo;
+                    const contentToReplace = originalContent.slice(symbolInfo.start.offset, symbolInfo.end.offset);
+                    
+                    console.log('🎬 PREVIEW: Content being replaced (length=' + contentToReplace.length + '):');
+                    console.log('---START ORIGINAL---');
+                    console.log(contentToReplace);
+                    console.log('---END ORIGINAL---');
+                    
+                    console.log('🎬 PREVIEW: Replacement content (length=' + change.code.length + '):');
+                    console.log('---START REPLACEMENT---');
+                    console.log(change.code);
+                    console.log('---END REPLACEMENT---');
+                    
+                    // EXACT same logic as applySingleChangeToContent
+                    const before = originalContent.slice(0, symbolInfo.start.offset);
+                    const after = originalContent.slice(symbolInfo.end.offset);
+                    modifiedContent = before + change.code + after;
+                    
+                    console.log('🎬 PREVIEW: Tree-sitter replacement complete');
+                    console.log('🎬 PREVIEW: Result length:', modifiedContent.length);
+                    
+                    // Show context
+                    const contextStart = Math.max(0, symbolInfo.start.offset - 50);
+                    const contextEnd = Math.min(modifiedContent.length, symbolInfo.start.offset + change.code.length + 50);
+                    console.log('🎬 PREVIEW: Result context:');
+                    console.log('---START CONTEXT---');
+                    console.log(modifiedContent.substring(contextStart, contextEnd));
+                    console.log('---END CONTEXT---');
+                    
+                } else if (validation.error) {
+                    console.log('🎬 PREVIEW: Tree-sitter validation failed:', validation.error);
+                    unableToPreviewReason = validation.error;
+                }
+            }
+            
+            // Fallback to simple string replacement only if Tree-sitter failed
+            if (unableToPreviewReason && change.target && change.target.length > 0) {
+                console.log('🎬 PREVIEW: Falling back to simple string replacement');
+                console.log('🎬 PREVIEW: Fallback reason:', unableToPreviewReason);
+                
                 const targetIndex = originalContent.indexOf(change.target);
                 if (targetIndex !== -1) {
-                    modifiedContent = originalContent.substring(0, targetIndex) +
-                                      change.code +
-                                      originalContent.substring(targetIndex + change.target.length);
+                    console.log('🎬 PREVIEW: Simple replacement found target at index:', targetIndex);
+                    const beforeReplace = originalContent.substring(0, targetIndex);
+                    const afterReplace = originalContent.substring(targetIndex + change.target.length);
+                    modifiedContent = beforeReplace + change.code + afterReplace;
+                    
+                    // Clear the error since fallback worked
+                    unableToPreviewReason = null;
+                    console.log('🎬 PREVIEW: Simple replacement successful');
                 } else {
-                    unableToPreviewReason = `Target text for replacement ("${change.target.substring(0, 50)}...") not found.`;
-                    modifiedContent = `// PREVIEW NOTE: ${unableToPreviewReason}${EOL}// Proposed code change below:${EOL}${change.code}${EOL}// --- Original File Content ---${EOL}${originalContent}`;
+                    unableToPreviewReason = `Target text not found in file`;
+                    console.log('🎬 PREVIEW: Simple replacement failed - target not found');
                 }
-            } else {
-                unableToPreviewReason = `'target' for replacement is empty. Cannot determine what to replace.`;
-                 modifiedContent = `// PREVIEW NOTE: ${unableToPreviewReason}${EOL}// Proposed code change below:${EOL}${change.code}${EOL}// --- Original File Content ---${EOL}${originalContent}`;
             }
-        } else if (change.action.toLowerCase().includes('add') || change.action.toLowerCase().includes('insert')) {
-            // Basic append for add/insert. For line-specific, more logic needed.
-            modifiedContent = originalContent + EOL + change.code;
-        } else {
-            unableToPreviewReason = `Action '${change.action}' diff preview is approximate.`;
-            modifiedContent = originalContent + EOL + `// --- Proposed code for action '${change.action}' (Target: ${change.target}) --- ${EOL}` + change.code;
+            
+        } catch (error) {
+            console.error('🎬 PREVIEW: Error during preview generation:', error);
+            unableToPreviewReason = `Preview generation failed: ${error instanceof Error ? error.message : String(error)}`;
         }
 
-        if (unableToPreviewReason) {
-            this._logger.warn(`Preview limitation for change ${change.id}: ${unableToPreviewReason}`);
-            this._stateManager.setChangeValidationErrors(change.id, [], [{
-                type: 'missing_description', // Or a more fitting warning type
-                message: `Preview limitation: ${unableToPreviewReason}`,
-                suggestion: 'Diff view shows approximated changes.'
-            }]);
-        }
+        console.log('🎬 ===========================');
 
-        const diffTitle = `Preview: ${path.basename(change.file)} (${change.action})`;
-        const modifiedDoc = await vscode.workspace.openTextDocument({
-            content: modifiedContent,
-            language: originalDocument.languageId
-        });
-        await vscode.commands.executeCommand('vscode.diff', originalDocument.uri, modifiedDoc.uri, diffTitle);
+        // Create the preview URI
+        const modifiedUri = vscode.Uri.parse(`differ-preview:${originalDocument.uri.fsPath}`);
+        
+        try {
+            console.log('🎬 PREVIEW: Writing to file system provider:', modifiedUri.toString());
+            console.log('🎬 PREVIEW: Content length to write:', modifiedContent.length);
+            
+            // Use the file system provider to write the modified content
+            const previewProvider = getPreviewFileSystemProvider();
+            await previewProvider.writeFile(modifiedUri, Buffer.from(modifiedContent, 'utf8'), { 
+                create: true, 
+                overwrite: true 
+            });
+            
+            console.log('🎬 PREVIEW: Successfully wrote to file system provider');
+            
+            if (unableToPreviewReason) {
+                vscode.window.showWarningMessage(`Preview may be inaccurate: ${unableToPreviewReason}`);
+            }
+            
+            // Now open the diff
+            console.log('🎬 PREVIEW: Opening diff view');
+            await vscode.commands.executeCommand('vscode.diff', 
+                originalDocument.uri, 
+                modifiedUri, 
+                `Preview: ${change.description || 'Change'}`
+            );
+            
+            console.log('🎬 PREVIEW: Diff view opened successfully');
+            
+        } catch (error) {
+            console.error('🎬 PREVIEW: Error creating preview:', error);
+            vscode.window.showErrorMessage(`Failed to create preview: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    }
+
+    private async _validateChangeUsingTreeSitter(change: PendingChange, filePath: string, workspace: vscode.WorkspaceFolder): Promise<{ symbolInfo?: SymbolInfo, error?: string }> {
+        console.log('🔍 TREE-SITTER VALIDATION for:', change.action);
+        
+        try {
+            switch (change.action) {
+                case 'replace_function':
+                case 'delete_function': {
+                    const result = await CodeAnalyzer.validateFunction(filePath, change.target, workspace);
+                    if (result.exists && result.symbolInfo) {
+                        return { symbolInfo: result.symbolInfo };
+                    } else {
+                        return { error: result.reason };
+                    }
+                }
+                case 'replace_method': {
+                    if (!change.class) {
+                        return { error: `Action 'replace_method' requires a CLASS for target '${change.target}'.` };
+                    }
+                    const result = await CodeAnalyzer.validateMethod(filePath, change.class, change.target, workspace);
+                    if (result.exists && result.symbolInfo) {
+                        return { symbolInfo: result.symbolInfo };
+                    } else {
+                        return { error: result.reason };
+                    }
+                }
+                case 'replace_block': {
+                    const result = await CodeAnalyzer.validateBlock(filePath, change.target, workspace);
+                    if (result.exists && result.symbolInfo) {
+                        return { symbolInfo: result.symbolInfo };
+                    } else {
+                        return { error: result.reason };
+                    }
+                }
+                default:
+                    return { error: `Tree-sitter validation not supported for action: ${change.action}` };
+            }
+        } catch (error) {
+            return { error: `Tree-sitter validation failed: ${error instanceof Error ? error.message : String(error)}` };
+        }
     }
 
     private async _previewNewFile(change: PendingChange, targetFileUri: vscode.Uri) {
