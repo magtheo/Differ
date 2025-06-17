@@ -487,7 +487,13 @@ export class CodeAnalyzer {
     private static getLanguageFromFile(filePath: string): string {
         const ext = path.extname(filePath).toLowerCase();
         const languageMap: { [key:string]: string } = {
-            '.js': 'javascript', '.ts': 'typescript', '.py': 'python', '.rs': 'rust'
+            '.js': 'javascript', 
+            '.ts': 'typescript', 
+            '.py': 'python', 
+            '.rs': 'rust',
+            '.css': 'css',
+            '.scss': 'css',  
+            '.less': 'css'
         };
         return languageMap[ext] || 'unknown';
     }

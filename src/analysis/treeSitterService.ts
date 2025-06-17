@@ -189,6 +189,31 @@ export class TreeSitterService {
                 console.warn('⚠️ Failed to load Rust grammar:', error);
             }
 
+            try {
+                const cssWasmPath = vscode.Uri.joinPath(grammarPath, 'tree-sitter-css.wasm');
+                const cssWasmData = await vscode.workspace.fs.readFile(cssWasmPath);
+                
+                let CSS;
+                if (this._Language && typeof this._Language.load === 'function') {
+                    CSS = await this._Language.load(cssWasmData);
+                } else if (this._Parser.Language && typeof this._Parser.Language.load === 'function') {
+                    CSS = await this._Parser.Language.load(cssWasmData);
+                } else {
+                    const treeSitterModule = require('web-tree-sitter');
+                    const Language = treeSitterModule.Language || treeSitterModule.default?.Language;
+                    if (Language && typeof Language.load === 'function') {
+                        CSS = await Language.load(cssWasmData);
+                    } else {
+                        throw new Error('Cannot find Language.load method');
+                    }
+                }
+                
+                this._languageMap.set('css', CSS);
+                console.log('✅ Loaded CSS grammar');
+            } catch (error) {
+                console.warn('⚠️ Failed to load CSS grammar:', error);
+            }
+
             const loadedLanguages = Array.from(this._languageMap.keys());
             console.log(`🎯 TreeSitter initialized with languages: ${loadedLanguages.join(', ')}`);
             
@@ -229,6 +254,13 @@ export class TreeSitterService {
                 ]`
         };
         this._queryMap.set('python', pythonQueries);
+
+        const cssQueries: TreeSitterQueries = {
+            functions: `(rule_set (selectors) @name)`,
+            classes: `(class_selector (class_name) @name)`,
+            imports: `(import_statement (string_value) @name)`  // ← Fixed: removed extra parenthesis
+        };
+        this._queryMap.set('css', cssQueries);
     }
     
     private getLanguage(languageId: string): any | undefined {
@@ -271,9 +303,20 @@ export class TreeSitterService {
         }
 
         try {
-            const query = language.query(queries[queryType]!);
-            const captures = query.captures(tree.rootNode);
-            return captures;
+            // FIX: Use the new Query constructor instead of language.query()
+            const treeSitterModule = require('web-tree-sitter');
+            const Query = treeSitterModule.Query || treeSitterModule.default?.Query;
+            
+            if (Query) {
+                const query = new Query(language, queries[queryType]!);
+                const captures = query.captures(tree.rootNode);
+                return captures;
+            } else {
+                // Fallback to the old method if new one isn't available
+                const query = language.query(queries[queryType]!);
+                const captures = query.captures(tree.rootNode);
+                return captures;
+            }
         } catch (error) {
             console.error(`❌ Tree-sitter query failed for language ${languageId}, query type ${queryType}:`, error);
             return [];
