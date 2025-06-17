@@ -5,12 +5,12 @@
 
 body {
     margin: 0;
-    padding: 16px;
+    padding: 8px;
     font-family: var(--vscode-font-family);
     font-size: var(--vscode-font-size);
     color: var(--vscode-foreground);
     background-color: var(--vscode-editor-background);
-    line-height: 1.4;
+    line-height: 1.3;
 }
 
 #app {

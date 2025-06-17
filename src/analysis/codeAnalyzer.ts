@@ -411,7 +411,7 @@ export class CodeAnalyzer {
 
     /**
      * Find node with exact text content match
-    */
+     */
     private static findExactTextMatch(tree: any, targetText: string): any | undefined {
         const normalizedTarget = this.normalizeCode(targetText);
         let bestMatch: any | undefined;
@@ -420,9 +420,29 @@ export class CodeAnalyzer {
         const walk = (node: any): void => {
             const normalizedNodeText = this.normalizeCode(node.text);
             
+            // Exact match
             if (normalizedNodeText === normalizedTarget) {
                 if (!bestMatch || node.text.length < bestMatch.text.length) {
+                    console.log('✅ EXACT TEXT MATCH FOUND:', node.type, node.startIndex, node.endIndex);
                     bestMatch = node;
+                }
+            }
+            
+            // For CSS: Also check if we're looking for a selector and this is a rule_set
+            if (node.type === 'rule_set' && targetText.trim().endsWith('{')) {
+                const selectorPart = targetText.replace(/\s*\{.*$/, '').trim();
+                
+                // Check if any selector in this rule matches
+                for (const child of node.children) {
+                    if (child.type === 'selectors') {
+                        for (const selector of child.children) {
+                            if (selector.text === selectorPart) {
+                                console.log('✅ EXACT CSS SELECTOR MATCH FOUND:', node.type, node.startIndex, node.endIndex);
+                                bestMatch = node;
+                                return;
+                            }
+                        }
+                    }
                 }
             }
             
@@ -474,12 +494,14 @@ export class CodeAnalyzer {
      */
     private static normalizeCode(code: string): string {
         return code
-            .replace(/\s+/g, ' ')           // Replace all whitespace with single spaces
-            .replace(/\s*{\s*/g, '{')       // Remove spaces around opening braces
-            .replace(/\s*}\s*/g, '}')       // Remove spaces around closing braces
-            .replace(/\s*;\s*/g, ';')       // Remove spaces around semicolons
-            .replace(/\s*,\s*/g, ',')       // Remove spaces around commas
-            .replace(/\s*=\s*/g, '=')       // Remove spaces around equals
+            .replace(/\/\*[\s\S]*?\*\//g, '')  // Remove CSS comments
+            .replace(/\s+/g, ' ')              // Replace all whitespace with single spaces
+            .replace(/\s*{\s*/g, '{')          // Remove spaces around opening braces
+            .replace(/\s*}\s*/g, '}')          // Remove spaces around closing braces
+            .replace(/\s*;\s*/g, ';')          // Remove spaces around semicolons
+            .replace(/\s*,\s*/g, ',')          // Remove spaces around commas
+            .replace(/\s*=\s*/g, '=')          // Remove spaces around equals
+            .replace(/\s*:\s*/g, ':')          // Remove spaces around colons (CSS properties)
             .trim();
     }
 
@@ -497,7 +519,7 @@ export class CodeAnalyzer {
         };
         return languageMap[ext] || 'unknown';
     }
-    
+
     private static findSimilarNames(target: string, candidates: string[], maxSuggestions = 3): string[] {
         const similarities = candidates.map(candidate => ({
             name: candidate,
@@ -511,7 +533,7 @@ export class CodeAnalyzer {
     }
 
     /**
-     * Find node by structural pattern (e.g., enum declarations, class definitions)
+     * Find node by structural pattern (e.g., enum declarations, class definitions, CSS rules)
      */
     private static findStructuralMatch(tree: any, targetText: string): any | undefined {
         console.log('🔍 Looking for structural match for:', targetText.substring(0, 50));
@@ -528,14 +550,118 @@ export class CodeAnalyzer {
             return this.findFunctionDeclaration(tree, targetText);
         }
         
-        // Check if target is a class method
-        if (targetText.match(/^\s*(public|private|protected|static|\w+)\s*\(/)) {
-            console.log('🎯 Target appears to be a method, using method-specific search');
-            // You would implement findMethodDeclaration here
+        // NEW: Check if target is a CSS rule (selector + block)
+        if (targetText.trim().match(/^[a-zA-Z#.][a-zA-Z0-9-_#.:,\s]*\s*\{[\s\S]*\}$/)) {
+            console.log('🎯 Target appears to be a complete CSS rule, using CSS rule search');
+            return this.findCSSRule(tree, targetText);
+        }
+        
+        // NEW: Check if target is just a CSS selector
+        if (targetText.trim().match(/^[a-zA-Z#.][a-zA-Z0-9-_#.:,\s]*\s*\{?\s*$/)) {
+            console.log('🎯 Target appears to be a CSS selector, using CSS selector search');
+            return this.findCSSRuleBySelector(tree, targetText);
         }
         
         console.log('❌ No specific structural pattern detected');
         return undefined;
+    }
+
+    /**
+     * Find complete CSS rule by matching the entire rule content
+     */
+    private static findCSSRule(tree: any, targetText: string): any | undefined {
+        console.log('🎯 FIND CSS RULE - Looking for complete rule');
+        
+        function walk(node: any): any | undefined {
+            if (node.type === 'rule_set') {
+                // Normalize both target and node text for comparison
+                const normalizedTarget = targetText.replace(/\s+/g, ' ').trim();
+                const normalizedNode = node.text.replace(/\s+/g, ' ').trim();
+                
+                // Check if this rule matches the target structure
+                if (normalizedNode.includes(normalizedTarget.substring(0, 50))) {
+                    console.log('✅ Found potential CSS rule match');
+                    console.log('   Node text length:', node.text.length);
+                    console.log('   Target length:', targetText.length);
+                    console.log('   Node text preview:', node.text.substring(0, 100));
+                    return node;
+                }
+            }
+            
+            for (const child of node.children) {
+                const result = walk(child);
+                if (result) return result;
+            }
+            
+            return undefined;
+        }
+        
+        return walk(tree.rootNode);
+    }
+
+    /**
+     * Find CSS rule by selector name (for targets like "body" or "body {")
+     */
+    private static findCSSRuleBySelector(tree: any, targetText: string): any | undefined {
+        // Extract selector name from target
+        const selectorMatch = targetText.trim().replace(/\s*\{.*$/, '').trim();
+        console.log('🎯 FIND CSS RULE BY SELECTOR - Looking for selector:', selectorMatch);
+        
+        function walk(node: any): any | undefined {
+            if (node.type === 'rule_set') {
+                console.log('🔍 Examining rule_set node');
+                
+                // Look for selectors within this rule
+                for (const child of node.children) {
+                    if (child.type === 'selectors') {
+                        console.log('   Found selectors node');
+                        
+                        // Check all selectors within this selectors node
+                        for (const selector of child.children) {
+                            console.log('     Checking selector type:', selector.type, 'text:', selector.text);
+                            
+                            // Handle different types of selectors
+                            if ((selector.type === 'tag_name' || selector.type === 'type_selector') && 
+                                selector.text === selectorMatch) {
+                                console.log('✅ Found CSS rule for tag selector:', selectorMatch);
+                                return node; // Return the entire rule_set
+                            }
+                            
+                            if (selector.type === 'class_selector' && 
+                                selector.text === selectorMatch) {
+                                console.log('✅ Found CSS rule for class selector:', selectorMatch);
+                                return node;
+                            }
+                            
+                            if (selector.type === 'id_selector' && 
+                                selector.text === selectorMatch) {
+                                console.log('✅ Found CSS rule for id selector:', selectorMatch);
+                                return node;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            for (const child of node.children) {
+                const result = walk(child);
+                if (result) return result;
+            }
+            
+            return undefined;
+        }
+        
+        const result = walk(tree.rootNode);
+        if (result) {
+            console.log('✅ CSS rule found for selector:', selectorMatch);
+            console.log('   Rule starts at:', result.startIndex);
+            console.log('   Rule ends at:', result.endIndex);
+            console.log('   Rule text:', result.text.substring(0, 100) + '...');
+        } else {
+            console.log('❌ No CSS rule found for selector:', selectorMatch);
+        }
+        
+        return result;
     }
 
     /**
