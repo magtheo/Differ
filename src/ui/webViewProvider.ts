@@ -6,7 +6,7 @@ import { ChangeParser, ParsedInput, ParsedChange, ValidationError, ValidationWar
 // import { ValidationEngine, ValidationSummary } from '../validation/validationEngine';
 // import { ErrorReporter } from '../validation/errorReporter';
 import { Logger } from '../utils/logger';
-import { CodeAnalyzer, SymbolInfo } from '../analysis/codeAnalyzer';
+import { CodeAnalyzer, offsetToPosition, SymbolInfo } from '../analysis/codeAnalyzer';
 import { getPreviewFileSystemProvider } from '../utils/previewFileSystemProvider';
 
 export class DifferProvider implements vscode.WebviewViewProvider {
@@ -421,7 +421,7 @@ export class DifferProvider implements vscode.WebviewViewProvider {
                 console.log('🎬 PREVIEW: Using Tree-sitter validation for:', relativePath);
                 
                 // Use the same validation helper
-                const validation = await this._validateChangeUsingTreeSitter(change, relativePath, workspace);
+                const validation = await this._validateChangeUsingTreeSitter(change, relativePath, workspace, originalContent);
                 
                 if (validation.symbolInfo) {
                     console.log('🎬 PREVIEW: Tree-sitter validation successful');
@@ -527,7 +527,12 @@ export class DifferProvider implements vscode.WebviewViewProvider {
         }
     }
 
-    private async _validateChangeUsingTreeSitter(change: PendingChange, filePath: string, workspace: vscode.WorkspaceFolder): Promise<{ symbolInfo?: SymbolInfo, error?: string }> {
+    private async _validateChangeUsingTreeSitter(
+        change: PendingChange, 
+        filePath: string, 
+        workspace: vscode.WorkspaceFolder,
+        originalContent: string // Add this new parameter
+    ): Promise<{ symbolInfo?: SymbolInfo, error?: string }> {
         console.log('🔍 TREE-SITTER VALIDATION for:', change.action);
         
         try {
@@ -535,31 +540,55 @@ export class DifferProvider implements vscode.WebviewViewProvider {
                 case 'replace_function':
                 case 'delete_function': {
                     const result = await CodeAnalyzer.validateFunction(filePath, change.target, workspace);
-                    if (result.exists && result.symbolInfo) {
-                        return { symbolInfo: result.symbolInfo };
-                    } else {
-                        return { error: result.reason };
-                    }
+                    return result.exists && result.symbolInfo ? { symbolInfo: result.symbolInfo } : { error: result.reason };
                 }
                 case 'replace_method': {
-                    if (!change.class) {
-                        return { error: `Action 'replace_method' requires a CLASS for target '${change.target}'.` };
-                    }
+                    if (!change.class) return { error: `Action 'replace_method' requires a CLASS for target '${change.target}'.` };
                     const result = await CodeAnalyzer.validateMethod(filePath, change.class, change.target, workspace);
-                    if (result.exists && result.symbolInfo) {
-                        return { symbolInfo: result.symbolInfo };
-                    } else {
-                        return { error: result.reason };
-                    }
+                    return result.exists && result.symbolInfo ? { symbolInfo: result.symbolInfo } : { error: result.reason };
                 }
                 case 'replace_block': {
                     const result = await CodeAnalyzer.validateBlock(filePath, change.target, workspace);
-                    if (result.exists && result.symbolInfo) {
-                        return { symbolInfo: result.symbolInfo };
+                    return result.exists && result.symbolInfo ? { symbolInfo: result.symbolInfo } : { error: result.reason };
+                }
+                // --- NEW CASES START HERE ---
+                case 'add_method': {
+                    if (!change.class) return { error: "Class name required for add_method." };
+                    const result = await CodeAnalyzer.validateClass(filePath, change.class, workspace);
+                    if (result.exists && result.symbolInfo?.end) {
+                        const insertionOffset = result.symbolInfo.end.offset - 1; // Insert before the class's closing brace
+                        const pos = offsetToPosition(originalContent, insertionOffset);
+                        return { symbolInfo: { name: change.target, start: pos, end: pos } };
                     } else {
                         return { error: result.reason };
                     }
                 }
+                case 'add_function':
+                case 'add_enum':
+                case 'add_struct': {
+                    const analysis = await CodeAnalyzer.analyzeFile(filePath, workspace);
+                    if (!analysis.isReadable || !analysis.tree) return { error: "Could not analyze file for addition." };
+                    const rootNode = analysis.tree.rootNode;
+                    let insertionOffset = analysis.content?.length || 0;
+                    if (rootNode && rootNode.namedChildren.length > 0) {
+                        const lastChild = rootNode.namedChildren[rootNode.namedChildren.length - 1];
+                        insertionOffset = lastChild.endIndex;
+                    }
+                    const pos = offsetToPosition(originalContent, insertionOffset);
+                    return { symbolInfo: { name: change.target, start: pos, end: pos } };
+                }
+                case 'add_import': {
+                    const analysis = await CodeAnalyzer.analyzeFile(filePath, workspace);
+                    if (!analysis.isReadable) return { error: "Could not analyze file for import." };
+                    let insertionOffset = 0;
+                    if (analysis.imports.length > 0) {
+                        const lastImportSymbol = analysis.imports[analysis.imports.length - 1];
+                        insertionOffset = lastImportSymbol.end.offset;
+                    }
+                    const pos = offsetToPosition(originalContent, insertionOffset);
+                    return { symbolInfo: { name: change.target, start: pos, end: pos } };
+                }
+                // --- NEW CASES END HERE ---
                 default:
                     return { error: `Tree-sitter validation not supported for action: ${change.action}` };
             }

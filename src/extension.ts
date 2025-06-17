@@ -2,7 +2,8 @@
 import * as vscode from 'vscode';
 import { ChangeParser, ParsedInput, ParsedChange } from './parser/inputParser';
 import { DifferProvider } from './ui/webViewProvider';
-import { CodeAnalyzer, Position, SymbolInfo } from './analysis/codeAnalyzer';
+
+import { CodeAnalyzer, Position, SymbolInfo, offsetToPosition } from './analysis/codeAnalyzer';
 import { getPreviewFileSystemProvider } from './utils/previewFileSystemProvider';
 
 // Store the provider instance to be accessible by command handlers
@@ -14,24 +15,6 @@ let differProviderInstance: DifferProvider | undefined;
 interface PositionalChange extends ParsedChange {
     start: Position;
     end: Position;
-}
-
-// Helper function to convert a 0-based offset to a 1-based line and column Position object
-function offsetToPosition(content: string, offset: number): Position {
-    if (offset < 0) offset = 0;
-    if (offset > content.length) offset = content.length;
-
-    let line = 1;
-    let lastNewlineIndex = -1;
-    for (let i = 0; i < offset; i++) {
-        if (content[i] === '\n') {
-            line++;
-            lastNewlineIndex = i;
-        }
-    }
-    // column is 1-based. It's the offset relative to the start of the current line.
-    const column = offset - lastNewlineIndex;
-    return { line, column, offset };
 }
 
 
@@ -153,9 +136,47 @@ async function applyChanges(input: ParsedInput) {
 }
 
 async function applyParsedChanges(input: ParsedInput, workspace: vscode.WorkspaceFolder) {
-    const groupedChanges = ChangeParser.groupChangesByFile(input);
-    for (const [filePath, changes] of groupedChanges) {
-        await applyChangesToFile(filePath, changes, workspace);
+    // --- Pass 1: Handle all 'create_file' actions first ---
+    console.log('🚀 Pass 1: Handling file creations...');
+    const creationChanges = input.changes.filter(c => c.action === 'create_file');
+    const modificationChanges = input.changes.filter(c => c.action !== 'create_file');
+
+    for (const change of creationChanges) {
+        console.log(`   Creating file: ${change.file}`);
+        const fullPath = vscode.Uri.joinPath(workspace.uri, change.file);
+        const writeData = Buffer.from(change.code, 'utf8');
+        try {
+            // Ensure the directory exists. This prevents errors if a path is like 'src/new_dir/new_file.ts'
+            const dirPath = vscode.Uri.joinPath(fullPath, '..');
+            await vscode.workspace.fs.createDirectory(dirPath);
+        } catch (e) {
+            // Ignore error if directory already exists
+            if (e instanceof vscode.FileSystemError && e.code === 'FileExists') {
+                // This is fine, directory is already there.
+            } else {
+                throw e; // Re-throw other errors
+            }
+        }
+        await vscode.workspace.fs.writeFile(fullPath, writeData);
+        console.log(`   ✅ Successfully created ${change.file}`);
+    }
+
+    // --- Pass 2: Handle all other modifications ---
+    console.log('🚀 Pass 2: Handling file modifications...');
+    if (modificationChanges.length > 0) {
+        const modificationsInput: ParsedInput = {
+            ...input,
+            changes: modificationChanges
+        };
+
+        const groupedModifications = ChangeParser.groupChangesByFile(modificationsInput);
+        
+        for (const [filePath, changes] of groupedModifications) {
+            // Now we call applyChangesToFile, which will no longer receive 'create_file' actions.
+            await applyChangesToFile(filePath, changes, workspace);
+        }
+    } else {
+        console.log('   No modifications to apply in Pass 2.');
     }
 }
 

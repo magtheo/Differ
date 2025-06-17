@@ -136,7 +136,11 @@ export class CodeAnalyzer {
         for (const capture of captures) {
             const nameNode = capture.node;
             // The actual block we want to replace is the parent of the name identifier.
-            const symbolBlockNode = nameNode.parent;
+            let symbolBlockNode = nameNode.parent;
+            // Check if the parent is part of an export statement, and if so, use the whole export statement.
+            if (symbolBlockNode?.parent?.type === 'export_statement') {
+                symbolBlockNode = symbolBlockNode.parent;
+            }
 
             if (symbolBlockNode) {
                 // Check if we are within the specified context
@@ -730,7 +734,7 @@ export class CodeAnalyzer {
         return walk(tree.rootNode);
     }
 
-
+        
     /**
      * Find enum declaration by name and structure
      */
@@ -883,4 +887,24 @@ export class CodeAnalyzer {
 
         return matrix[b.length][a.length];
     }
+}
+
+/**
+* Helper function to convert a 0-based offset to a 1-based line and column Position object
+*/
+export function offsetToPosition(content: string, offset: number): Position {
+    if (offset < 0) offset = 0;
+    if (offset > content.length) offset = content.length;
+
+    let line = 1;
+    let lastNewlineIndex = -1;
+    for (let i = 0; i < offset; i++) {
+        if (content[i] === '\n') {
+            line++;
+            lastNewlineIndex = i;
+        }
+    }
+    // column is 1-based. It's the offset relative to the start of the current line.
+    const column = offset - lastNewlineIndex;
+    return { line, column, offset };
 }

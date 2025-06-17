@@ -161,30 +161,31 @@ export class TreeSitterService {
 
         // TypeScript has additional node types
         const tsQueries: TreeSitterQueries = {
-            functions: `
-                [
-                    (function_declaration name: (identifier) @name)
-                    (variable_declarator name: (identifier) @name value: [(arrow_function) (function_expression)])
-                    (method_definition name: (property_identifier) @name)
-                    (method_signature name: (property_identifier) @name)
-                ]`,
-            classes: `
-                [
-                    (class_declaration name: (identifier) @name)
-                    (interface_declaration name: (identifier) @name)
-                    (type_alias_declaration name: (identifier) @name)
-                ]`,
-            imports: `
-                [
-                    (import_statement (import_clause (identifier) @name))
-                    (import_statement (import_clause (named_imports (import_specifier name: (identifier) @name))))
-                ]`,
-            methods: `
-                [
-                    (method_definition name: (property_identifier) @name)
-                    (method_signature name: (property_identifier) @name)
-                ]`
-        };
+        functions: `
+            [
+                (function_declaration name: (identifier) @name)
+                (variable_declarator name: (identifier) @name value: [(arrow_function) (function_expression)])
+                (method_definition name: (property_identifier) @name)
+                (method_signature name: (property_identifier) @name)
+            ]`,
+        classes: `
+            [
+                (class_declaration name: (type_identifier) @name)
+                (interface_declaration name: (type_identifier) @name)
+                (type_alias_declaration name: (type_identifier) @name)
+                (enum_declaration name: (identifier) @name) 
+            ]`, // Corrected to use type_identifier and added enum
+        imports: `
+            [
+                (import_statement (import_clause (identifier) @name))
+                (import_statement (import_clause (named_imports (import_specifier name: (identifier) @name))))
+            ]`,
+        methods: `
+            [
+                (method_definition name: (property_identifier) @name)
+                (method_signature name: (property_identifier) @name)
+            ]`
+    };
         this._queryMap.set('typescript', tsQueries);
 
         const pythonQueries: TreeSitterQueries = {
@@ -194,7 +195,8 @@ export class TreeSitterService {
                 [
                     (import_statement (dotted_name (identifier) @name))
                     (import_from_statement (dotted_name (identifier) @name))
-                ]`
+                ]`,
+            methods: `(function_definition name: (identifier) @name)`
         };
         this._queryMap.set('python', pythonQueries);
 
@@ -215,6 +217,10 @@ export class TreeSitterService {
                 [
                     (use_declaration (use_list (identifier) @name))
                     (use_declaration (scoped_identifier name: (identifier) @name))
+                ]`,
+            methods: `
+                [
+                    (function_item name: (identifier) @name)
                 ]`
         };
         this._queryMap.set('rust', rustQueries);
