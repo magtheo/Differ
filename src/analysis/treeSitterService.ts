@@ -7,13 +7,27 @@ interface TreeSitterQueries {
     methods?: string;
 }
 
+interface LanguageConfig {
+    id: string;
+    wasmFile: string;
+    displayName: string;
+}
+
 export class TreeSitterService {
     private _parser: any;
     private _languageMap: Map<string, any> = new Map();
     private _queryMap: Map<string, TreeSitterQueries> = new Map();
     private _isInitialized = false;
     private _Parser: any;
-    private _Language: any; // Add this to store the Language class
+    private _Language: any;
+
+    private static readonly SUPPORTED_LANGUAGES: LanguageConfig[] = [
+        { id: 'javascript', wasmFile: 'tree-sitter-javascript.wasm', displayName: 'JavaScript' },
+        { id: 'typescript', wasmFile: 'tree-sitter-typescript.wasm', displayName: 'TypeScript' },
+        { id: 'python', wasmFile: 'tree-sitter-python.wasm', displayName: 'Python' },
+        { id: 'rust', wasmFile: 'tree-sitter-rust.wasm', displayName: 'Rust' },
+        { id: 'css', wasmFile: 'tree-sitter-css.wasm', displayName: 'CSS' }
+    ];
 
     private constructor(private _extensionUri: vscode.Uri) {}
 
@@ -83,135 +97,8 @@ export class TreeSitterService {
         try {
             const grammarPath = vscode.Uri.joinPath(this._extensionUri, 'out', 'grammars');
             
-            // Try to load JavaScript grammar
-            try {
-                const jsWasmPath = vscode.Uri.joinPath(grammarPath, 'tree-sitter-javascript.wasm');
-                const jsWasmData = await vscode.workspace.fs.readFile(jsWasmPath);
-                
-                // Try different approaches to load the language
-                let JavaScript;
-                if (this._Language && typeof this._Language.load === 'function') {
-                    JavaScript = await this._Language.load(jsWasmData);
-                } else if (this._Parser.Language && typeof this._Parser.Language.load === 'function') {
-                    JavaScript = await this._Parser.Language.load(jsWasmData);
-                } else {
-                    // Alternative approach for bundled versions
-                    const treeSitterModule = require('web-tree-sitter');
-                    const Language = treeSitterModule.Language || treeSitterModule.default?.Language;
-                    if (Language && typeof Language.load === 'function') {
-                        JavaScript = await Language.load(jsWasmData);
-                    } else {
-                        throw new Error('Cannot find Language.load method');
-                    }
-                }
-                
-                this._languageMap.set('javascript', JavaScript);
-                console.log('✅ Loaded JavaScript grammar');
-            } catch (error) {
-                console.warn('⚠️ Failed to load JavaScript grammar:', error);
-            }
-
-            // Try to load TypeScript grammar
-            try {
-                const tsWasmPath = vscode.Uri.joinPath(grammarPath, 'tree-sitter-typescript.wasm');
-                const tsWasmData = await vscode.workspace.fs.readFile(tsWasmPath);
-                
-                let TypeScript;
-                if (this._Language && typeof this._Language.load === 'function') {
-                    TypeScript = await this._Language.load(tsWasmData);
-                } else if (this._Parser.Language && typeof this._Parser.Language.load === 'function') {
-                    TypeScript = await this._Parser.Language.load(tsWasmData);
-                } else {
-                    const treeSitterModule = require('web-tree-sitter');
-                    const Language = treeSitterModule.Language || treeSitterModule.default?.Language;
-                    if (Language && typeof Language.load === 'function') {
-                        TypeScript = await Language.load(tsWasmData);
-                    } else {
-                        throw new Error('Cannot find Language.load method');
-                    }
-                }
-                
-                this._languageMap.set('typescript', TypeScript);
-                console.log('✅ Loaded TypeScript grammar');
-            } catch (error) {
-                console.warn('⚠️ Failed to load TypeScript grammar:', error);
-            }
-
-            // Try to load Python grammar
-            try {
-                const pyWasmPath = vscode.Uri.joinPath(grammarPath, 'tree-sitter-python.wasm');
-                const pyWasmData = await vscode.workspace.fs.readFile(pyWasmPath);
-                
-                let Python;
-                if (this._Language && typeof this._Language.load === 'function') {
-                    Python = await this._Language.load(pyWasmData);
-                } else if (this._Parser.Language && typeof this._Parser.Language.load === 'function') {
-                    Python = await this._Parser.Language.load(pyWasmData);
-                } else {
-                    const treeSitterModule = require('web-tree-sitter');
-                    const Language = treeSitterModule.Language || treeSitterModule.default?.Language;
-                    if (Language && typeof Language.load === 'function') {
-                        Python = await Language.load(pyWasmData);
-                    } else {
-                        throw new Error('Cannot find Language.load method');
-                    }
-                }
-                
-                this._languageMap.set('python', Python);
-                console.log('✅ Loaded Python grammar');
-            } catch (error) {
-                console.warn('⚠️ Failed to load Python grammar:', error);
-            }
-
-            // Try to load Rust grammar
-            try {
-                const rustWasmPath = vscode.Uri.joinPath(grammarPath, 'tree-sitter-rust.wasm');
-                const rustWasmData = await vscode.workspace.fs.readFile(rustWasmPath);
-                
-                let Rust;
-                if (this._Language && typeof this._Language.load === 'function') {
-                    Rust = await this._Language.load(rustWasmData);
-                } else if (this._Parser.Language && typeof this._Parser.Language.load === 'function') {
-                    Rust = await this._Parser.Language.load(rustWasmData);
-                } else {
-                    const treeSitterModule = require('web-tree-sitter');
-                    const Language = treeSitterModule.Language || treeSitterModule.default?.Language;
-                    if (Language && typeof Language.load === 'function') {
-                        Rust = await Language.load(rustWasmData);
-                    } else {
-                        throw new Error('Cannot find Language.load method');
-                    }
-                }
-                
-                this._languageMap.set('rust', Rust);
-                console.log('✅ Loaded Rust grammar');
-            } catch (error) {
-                console.warn('⚠️ Failed to load Rust grammar:', error);
-            }
-
-            try {
-                const cssWasmPath = vscode.Uri.joinPath(grammarPath, 'tree-sitter-css.wasm');
-                const cssWasmData = await vscode.workspace.fs.readFile(cssWasmPath);
-                
-                let CSS;
-                if (this._Language && typeof this._Language.load === 'function') {
-                    CSS = await this._Language.load(cssWasmData);
-                } else if (this._Parser.Language && typeof this._Parser.Language.load === 'function') {
-                    CSS = await this._Parser.Language.load(cssWasmData);
-                } else {
-                    const treeSitterModule = require('web-tree-sitter');
-                    const Language = treeSitterModule.Language || treeSitterModule.default?.Language;
-                    if (Language && typeof Language.load === 'function') {
-                        CSS = await Language.load(cssWasmData);
-                    } else {
-                        throw new Error('Cannot find Language.load method');
-                    }
-                }
-                
-                this._languageMap.set('css', CSS);
-                console.log('✅ Loaded CSS grammar');
-            } catch (error) {
-                console.warn('⚠️ Failed to load CSS grammar:', error);
+            for (const config of TreeSitterService.SUPPORTED_LANGUAGES) {
+                await this.loadSingleLanguage(config, grammarPath);
             }
 
             const loadedLanguages = Array.from(this._languageMap.keys());
@@ -222,17 +109,46 @@ export class TreeSitterService {
         }
     }
 
+    private async loadSingleLanguage(config: LanguageConfig, grammarPath: vscode.Uri): Promise<void> {
+        try {
+            const wasmPath = vscode.Uri.joinPath(grammarPath, config.wasmFile);
+            const wasmData = await vscode.workspace.fs.readFile(wasmPath);
+            
+            let language;
+            if (this._Language && typeof this._Language.load === 'function') {
+                language = await this._Language.load(wasmData);
+            } else if (this._Parser.Language && typeof this._Parser.Language.load === 'function') {
+                language = await this._Parser.Language.load(wasmData);
+            } else {
+                const treeSitterModule = require('web-tree-sitter');
+                const Language = treeSitterModule.Language || treeSitterModule.default?.Language;
+                if (Language && typeof Language.load === 'function') {
+                    language = await Language.load(wasmData);
+                } else {
+                    throw new Error('Cannot find Language.load method');
+                }
+            }
+            
+            this._languageMap.set(config.id, language);
+            console.log(`✅ Loaded ${config.displayName} grammar`);
+            
+        } catch (error) {
+            console.warn(`⚠️ Failed to load ${config.displayName} grammar:`, error);
+        }
+    }
+
     private defineQueries(): void {
-        const tsQueries: TreeSitterQueries = {
+        // FIXED: Correct JavaScript/TypeScript queries with proper node names
+        const jsQueries: TreeSitterQueries = {
             functions: `
                 [
                     (function_declaration name: (identifier) @name)
-                    (lexical_declaration (variable_declarator name: (identifier) @name value: [(arrow_function) (function)]))
+                    (variable_declarator name: (identifier) @name value: [(arrow_function) (function_expression)])
+                    (method_definition name: (property_identifier) @name)
                 ]`,
             classes: `
                 [
-                    (class_declaration name: (type_identifier) @name)
-                    (interface_declaration name: (type_identifier) @name)
+                    (class_declaration name: (identifier) @name)
                 ]`,
             imports: `
                 [
@@ -241,8 +157,35 @@ export class TreeSitterService {
                 ]`,
             methods: `(method_definition name: (property_identifier) @name)`
         };
+        this._queryMap.set('javascript', jsQueries);
+
+        // TypeScript has additional node types
+        const tsQueries: TreeSitterQueries = {
+            functions: `
+                [
+                    (function_declaration name: (identifier) @name)
+                    (variable_declarator name: (identifier) @name value: [(arrow_function) (function_expression)])
+                    (method_definition name: (property_identifier) @name)
+                    (method_signature name: (property_identifier) @name)
+                ]`,
+            classes: `
+                [
+                    (class_declaration name: (identifier) @name)
+                    (interface_declaration name: (identifier) @name)
+                    (type_alias_declaration name: (identifier) @name)
+                ]`,
+            imports: `
+                [
+                    (import_statement (import_clause (identifier) @name))
+                    (import_statement (import_clause (named_imports (import_specifier name: (identifier) @name))))
+                ]`,
+            methods: `
+                [
+                    (method_definition name: (property_identifier) @name)
+                    (method_signature name: (property_identifier) @name)
+                ]`
+        };
         this._queryMap.set('typescript', tsQueries);
-        this._queryMap.set('javascript', tsQueries);
 
         const pythonQueries: TreeSitterQueries = {
             functions: `(function_definition name: (identifier) @name)`,
@@ -250,15 +193,36 @@ export class TreeSitterService {
             imports: `
                 [
                     (import_statement (dotted_name (identifier) @name))
-                    (from_import_statement (dotted_name (identifier) @name))
+                    (import_from_statement (dotted_name (identifier) @name))
                 ]`
         };
         this._queryMap.set('python', pythonQueries);
 
+        const rustQueries: TreeSitterQueries = {
+            functions: `
+                [
+                    (function_item name: (identifier) @name)
+                    (function_signature_item name: (identifier) @name)
+                ]`,
+            classes: `
+                [
+                    (struct_item name: (type_identifier) @name)
+                    (enum_item name: (type_identifier) @name)
+                    (trait_item name: (type_identifier) @name)
+                    (impl_item type: (type_identifier) @name)
+                ]`,
+            imports: `
+                [
+                    (use_declaration (use_list (identifier) @name))
+                    (use_declaration (scoped_identifier name: (identifier) @name))
+                ]`
+        };
+        this._queryMap.set('rust', rustQueries);
+
         const cssQueries: TreeSitterQueries = {
             functions: `(rule_set (selectors) @name)`,
             classes: `(class_selector (class_name) @name)`,
-            imports: `(import_statement (string_value) @name)`  // ← Fixed: removed extra parenthesis
+            imports: `(import_statement (string_value) @name)`
         };
         this._queryMap.set('css', cssQueries);
     }
@@ -303,7 +267,6 @@ export class TreeSitterService {
         }
 
         try {
-            // FIX: Use the new Query constructor instead of language.query()
             const treeSitterModule = require('web-tree-sitter');
             const Query = treeSitterModule.Query || treeSitterModule.default?.Query;
             
