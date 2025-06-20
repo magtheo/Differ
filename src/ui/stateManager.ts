@@ -1,5 +1,24 @@
+// src/ui/stateManager.ts
 import * as vscode from 'vscode';
-import { ValidationError, ValidationWarning, ChangeAction, ParsedInput, ParsedChange } from '../parser/inputParser';
+import {
+    ParsedInput,
+    ParsedChange,
+    ChangeAction,
+    DetailedError,
+    ChangeApplicationResult,
+    FailedChangeExportPayload, // Added import
+    // InputFormatValidationError, // These are specific to ChangeParser's structural validation
+    // InputFormatValidationWarning
+} from '../parser/inputParser';
+
+export type PendingChangeStatus =
+    | 'pending'
+    | 'validation_error'
+    | 'queued'
+    | 'applying'
+    | 'applied'
+    | 'failed'
+    | 'awaiting_fix';
 
 export interface PendingChange {
     id: string;
@@ -8,457 +27,428 @@ export interface PendingChange {
     target: string;
     code: string;
     class?: string;
-    description?: string; // Add this line
+    description?: string;
     selected: boolean;
-    status: 'pending' | 'applied' | 'failed' | 'error' | 'validation_error';
-    error?: string; // Legacy error field for backwards compatibility
-    validationErrors: ValidationError[];  // NEW: Per-change validation errors
-    validationWarnings: ValidationWarning[]; // NEW: Per-change validation warnings
-    isValid: boolean;  // NEW: Quick validation check
+
+    status: PendingChangeStatus;
+    validationErrors: DetailedError[];
+    validationWarnings: DetailedError[];
+    applicationError?: DetailedError;
+
+    isValid: boolean;
+    originalInputBlockIndex?: number;
+}
+
+export interface FailedChangeToFixInfo {
+    changeId: string;
+    error: DetailedError;
+    originalChange: ParsedChange;
 }
 
 export interface UIState {
-    // Input state
-    jsonInput: string;
+    rawInput: string;
     parsedInput: ParsedInput | null;
-    
-    // Changes state
     pendingChanges: PendingChange[];
-    selectedChanges: string[];
-    
-    // UI state
+    currentBatchId?: string;
+    batchProcessingStatus: 'idle' | 'parsing' | 'validating' | 'processing' | 'awaiting_fix' | 'partially_completed' | 'completed';
+    totalChangesInBatch?: number;
+    processedInCurrentBatchAttempt?: number;
+    succeededInCurrentBatchAttempt?: number;
+    failedChangeToFix?: FailedChangeToFixInfo;
     isLoading: boolean;
-    error: string | null; // Legacy global error
-    
-    // NEW: Enhanced validation state
-    validationInProgress: boolean;  // Track validation state separately from loading
-    globalValidationErrors: ValidationError[];  // JSON-level validation errors
-    globalValidationWarnings: ValidationWarning[]; // JSON-level validation warnings
-    
-    // History state (placeholder for now)
+    inputFormatValidationErrors: DetailedError[];
+    inputFormatValidationWarnings: DetailedError[];
     changeHistory: any[];
 }
 
 export class UIStateManager {
-    private _state: UIState = {
-        jsonInput: '',
-        parsedInput: null,
-        pendingChanges: [],
-        selectedChanges: [],
-        isLoading: false,
-        error: null,
-        validationInProgress: false,
-        globalValidationErrors: [],
-        globalValidationWarnings: [],
-        changeHistory: []
-    };
-    
+    private _state: UIState;
     private _onStateChangeEmitter = new vscode.EventEmitter<UIState>();
     public readonly onStateChange = this._onStateChangeEmitter.event;
-    
+
     constructor() {
-        // Initialize state
-        this._state.isLoading = false;
-        this._state.validationInProgress = false;
+        this._state = {
+            rawInput: '',
+            parsedInput: null,
+            pendingChanges: [],
+            currentBatchId: undefined,
+            batchProcessingStatus: 'idle',
+            totalChangesInBatch: undefined,
+            processedInCurrentBatchAttempt: undefined,
+            succeededInCurrentBatchAttempt: undefined,
+            failedChangeToFix: undefined,
+            isLoading: false,
+            inputFormatValidationErrors: [],
+            inputFormatValidationWarnings: [],
+            changeHistory: []
+        };
+        this._logger('Initialized with default state.');
     }
-    
+
+    private _logger(message: string, data?: any) {
+        // Simple console logger for state manager actions
+        // console.log(`[UIStateManager] ${message}`, data === undefined ? '' : data);
+    }
+
     public dispose() {
         this._onStateChangeEmitter.dispose();
     }
-    
+
     public getState(): UIState {
-        return { ...this._state };
+        return JSON.parse(JSON.stringify(this._state));
     }
-    
+
     private _updateState(updates: Partial<UIState>) {
         this._state = { ...this._state, ...updates };
         this._onStateChangeEmitter.fire(this.getState());
     }
-    
-    // Input management
-    public setJsonInput(input: string) {
-        this._updateState({ 
-            jsonInput: input,
-            // Clear previous validation errors when input changes
-            globalValidationErrors: [],
-            globalValidationWarnings: [],
-            error: null
-        });
-    }
-    
-    public setParsedInput(parsed: ParsedInput | null) {
-        this._updateState({ parsedInput: parsed });
-    }
-    
-    public clearInput() {
-        this._updateState({ 
-            jsonInput: '',
+
+    public setRawInput(input: string) {
+        this._logger('Setting raw input.');
+        this._updateState({
+            rawInput: input,
             parsedInput: null,
-            error: null,
-            globalValidationErrors: [],
-            globalValidationWarnings: []
-        });
-    }
-    
-    // NEW: Global validation error management
-    public setGlobalValidationErrors(errors: ValidationError[], warnings: ValidationWarning[] = []) {
-        this._updateState({ 
-            globalValidationErrors: errors,
-            globalValidationWarnings: warnings,
-            // Clear legacy error when setting validation errors
-            error: null
-        });
-    }
-    
-    public clearGlobalValidationErrors() {
-        this._updateState({ 
-            globalValidationErrors: [],
-            globalValidationWarnings: []
-        });
-    }
-    
-    public hasGlobalValidationErrors(): boolean {
-        return this._state.globalValidationErrors.length > 0;
-    }
-    
-    public getGlobalValidationSummary(): string {
-        const errorCount = this._state.globalValidationErrors.length;
-        const warningCount = this._state.globalValidationWarnings.length;
-        
-        if (errorCount === 0 && warningCount === 0) {
-            return '';
-        }
-        
-        let summary = '';
-        if (errorCount > 0) {
-            summary += `${errorCount} error${errorCount > 1 ? 's' : ''}`;
-        }
-        if (warningCount > 0) {
-            if (summary) summary += ', ';
-            summary += `${warningCount} warning${warningCount > 1 ? 's' : ''}`;
-        }
-        
-        return summary;
-    }
-    
-    // Changes management
-    public setPendingChanges(changes: PendingChange[]) {
-        const selectedChanges = changes
-            .filter(change => change.selected)
-            .map(change => change.id);
-            
-        this._updateState({ 
-            pendingChanges: changes,
-            selectedChanges
-        });
-    }
-    
-    public addPendingChange(change: PendingChange) {
-        const newChanges = [...this._state.pendingChanges, change];
-        const selectedChanges = change.selected 
-            ? [...this._state.selectedChanges, change.id]
-            : this._state.selectedChanges;
-            
-        this._updateState({ 
-            pendingChanges: newChanges,
-            selectedChanges
-        });
-    }
-    
-    public removePendingChange(changeId: string) {
-        const newChanges = this._state.pendingChanges.filter(c => c.id !== changeId);
-        const selectedChanges = this._state.selectedChanges.filter(id => id !== changeId);
-        
-        this._updateState({ 
-            pendingChanges: newChanges,
-            selectedChanges
-        });
-    }
-    
-    public updatePendingChangeStatus(changeId: string, status: PendingChange['status'], error?: string) {
-        const newChanges = this._state.pendingChanges.map(change => 
-            change.id === changeId 
-                ? { ...change, status, error }
-                : change
-        );
-        
-        this._updateState({ pendingChanges: newChanges });
-    }
-    
-    // NEW: Validation-specific change updates
-    public setChangeValidationErrors(changeId: string, errors: ValidationError[], warnings: ValidationWarning[] = []) {
-        const newChanges = this._state.pendingChanges.map(change => 
-            change.id === changeId 
-                ? { 
-                    ...change, 
-                    validationErrors: errors,
-                    validationWarnings: warnings,
-                    isValid: errors.length === 0,
-                    status: errors.length > 0 ? 'validation_error' as const : 'pending' as const
-                }
-                : change
-        );
-        
-        this._updateState({ pendingChanges: newChanges });
-    }
-    
-    public clearChangeValidationErrors(changeId: string) {
-        this.setChangeValidationErrors(changeId, [], []);
-    }
-    
-    public clearAllValidationErrors() {
-        const newChanges = this._state.pendingChanges.map(change => ({
-            ...change,
-            validationErrors: [],
-            validationWarnings: [],
-            isValid: true,
-            status: change.status === 'validation_error' ? 'pending' as const : change.status
-        }));
-        
-        this._updateState({ 
-            pendingChanges: newChanges,
-            globalValidationErrors: [],
-            globalValidationWarnings: []
-        });
-    }
-    
-    public clearPendingChanges() {
-        this._updateState({ 
             pendingChanges: [],
-            selectedChanges: [],
-            parsedInput: null
+            inputFormatValidationErrors: [],
+            inputFormatValidationWarnings: [],
+            batchProcessingStatus: 'idle',
+            failedChangeToFix: undefined,
         });
     }
-    
-    public toggleChangeSelection(changeId: string, selected: boolean) {
-        // Update the change itself
-        const newChanges = this._state.pendingChanges.map(change => 
-            change.id === changeId 
-                ? { ...change, selected }
-                : change
-        );
-        
-        // Update selected changes list
-        let selectedChanges: string[];
-        if (selected) {
-            selectedChanges = [...this._state.selectedChanges, changeId];
+
+    public setParsedInput(parsed: ParsedInput | null, formatErrors: DetailedError[] = [], formatWarnings: DetailedError[] = []) {
+        this._logger('Setting parsed input and pending changes.');
+        if (parsed) {
+            const pendingChanges = parsed.changes.map((pc, index) =>
+                // Pass the rawInput from the state, not from parsed.metadata
+                this.createPendingChangeFromParsed(pc, index, this._state.rawInput)
+            );
+            this._updateState({
+                parsedInput: parsed,
+                pendingChanges: pendingChanges,
+                inputFormatValidationErrors: formatErrors,
+                inputFormatValidationWarnings: formatWarnings,
+                isLoading: false,
+                batchProcessingStatus: formatErrors.length > 0 ? 'idle' : 'validating',
+            });
         } else {
-            selectedChanges = this._state.selectedChanges.filter(id => id !== changeId);
+            this._updateState({
+                parsedInput: null,
+                pendingChanges: [],
+                inputFormatValidationErrors: formatErrors,
+                inputFormatValidationWarnings: formatWarnings,
+                isLoading: false,
+            });
         }
-        
-        this._updateState({ 
-            pendingChanges: newChanges,
-            selectedChanges
+    }
+
+    public clearAllInputAndState() {
+        this._logger('Clearing all input and state.');
+        this._updateState({
+            rawInput: '',
+            parsedInput: null,
+            pendingChanges: [],
+            currentBatchId: undefined,
+            batchProcessingStatus: 'idle',
+            totalChangesInBatch: undefined,
+            processedInCurrentBatchAttempt: undefined,
+            succeededInCurrentBatchAttempt: undefined,
+            failedChangeToFix: undefined,
+            isLoading: false,
+            inputFormatValidationErrors: [],
+            inputFormatValidationWarnings: [],
         });
     }
-    
-    public selectAllChanges() {
-        const newChanges = this._state.pendingChanges.map(change => ({
-            ...change,
-            selected: true
-        }));
-        
-        const selectedChanges = newChanges.map(change => change.id);
-        
-        this._updateState({ 
-            pendingChanges: newChanges,
-            selectedChanges
+
+    public startBatchProcessing(batchId: string, changesToProcess: PendingChange[]) {
+        this._logger(`Starting batch processing: ${batchId}`, { count: changesToProcess.length });
+        const updatedPendingChanges = this._state.pendingChanges.map(pc => {
+            if (changesToProcess.find(ctp => ctp.id === pc.id)) {
+                return { ...pc, status: 'queued' as PendingChangeStatus, applicationError: undefined };
+            }
+            return pc;
+        });
+
+        this._updateState({
+            currentBatchId: batchId,
+            batchProcessingStatus: 'processing',
+            totalChangesInBatch: changesToProcess.length,
+            processedInCurrentBatchAttempt: 0,
+            succeededInCurrentBatchAttempt: 0,
+            failedChangeToFix: undefined,
+            pendingChanges: updatedPendingChanges,
+            isLoading: false,
         });
     }
-    
-    public deselectAllChanges() {
-        const newChanges = this._state.pendingChanges.map(change => ({
-            ...change,
-            selected: false
-        }));
-        
-        this._updateState({ 
-            pendingChanges: newChanges,
-            selectedChanges: []
-        });
-    }
-    
-    // NEW: Select only valid changes
-    public selectOnlyValidChanges() {
-        const newChanges = this._state.pendingChanges.map(change => ({
-            ...change,
-            selected: change.isValid
-        }));
-        
-        const selectedChanges = newChanges
-            .filter(change => change.selected)
-            .map(change => change.id);
-        
-        this._updateState({ 
-            pendingChanges: newChanges,
-            selectedChanges
-        });
-    }
-    
-    // UI state management
-    public setLoading(loading: boolean) {
-        this._updateState({ isLoading: loading });
-    }
-    
-    // NEW: Validation progress tracking
-    public setValidationInProgress(inProgress: boolean) {
-        this._updateState({ validationInProgress: inProgress });
-    }
-    
-    public setError(error: string | null) {
-        this._updateState({ error });
-    }
-    
-    // History management (placeholder for now)
-    public addToHistory(historyEntry: any) {
-        const newHistory = [...this._state.changeHistory, historyEntry];
-        this._updateState({ changeHistory: newHistory });
-    }
-    
-    public clearHistory() {
-        this._updateState({ changeHistory: [] });
-    }
-    
-    // Computed properties
-    public getSelectedChanges(): PendingChange[] {
-        return this._state.pendingChanges.filter(change => 
-            this._state.selectedChanges.includes(change.id)
+
+    public markChangeAsApplying(changeId: string) {
+        this._logger(`Marking change as applying: ${changeId}`);
+        const newChanges = this._state.pendingChanges.map(pc =>
+            pc.id === changeId ? { ...pc, status: 'applying' as PendingChangeStatus } : pc
         );
+        this._updateState({
+            pendingChanges: newChanges,
+            processedInCurrentBatchAttempt: (this._state.processedInCurrentBatchAttempt || 0) + 1,
+        });
     }
-    
-    public hasSelectedChanges(): boolean {
-        return this._state.selectedChanges.length > 0;
+
+    public recordChangeApplicationResult(result: ChangeApplicationResult) {
+        this._logger(`Recording change application result for: ${result.changeId}`, { success: result.success });
+        const newChanges = this._state.pendingChanges.map(pc => {
+            if (pc.id === result.changeId) {
+                return {
+                    ...pc,
+                    status: result.success ? 'applied' as PendingChangeStatus : 'failed' as PendingChangeStatus,
+                    applicationError: result.error,
+                    isValid: result.success,
+                };
+            }
+            return pc;
+        });
+
+        let updates: Partial<UIState> = { pendingChanges: newChanges };
+        if (result.success) {
+            updates.succeededInCurrentBatchAttempt = (this._state.succeededInCurrentBatchAttempt || 0) + 1;
+        }
+        this._updateState(updates);
     }
-    
-    public hasPendingChanges(): boolean {
-        return this._state.pendingChanges.length > 0;
+
+    public handleBatchFailure(batchId: string, failedChangeResult: ChangeApplicationResult) {
+        this._logger(`Handling batch failure for batch: ${batchId}, failed change: ${failedChangeResult.changeId}`);
+        this._updateState({
+            batchProcessingStatus: 'awaiting_fix',
+            failedChangeToFix: {
+                changeId: failedChangeResult.changeId,
+                error: failedChangeResult.error!,
+                originalChange: failedChangeResult.originalChange,
+            },
+        });
     }
-    
-    public getPendingChangesCount(): number {
-        return this._state.pendingChanges.length;
+
+    public completeBatchSuccessfully(batchId: string) {
+        this._logger(`Batch completed successfully: ${batchId}`);
+        this._updateState({
+            batchProcessingStatus: 'completed',
+            currentBatchId: undefined,
+            failedChangeToFix: undefined,
+        });
     }
-    
-    public getSelectedChangesCount(): number {
-        return this._state.selectedChanges.length;
+
+    public prepareForFix(changeId: string) {
+        this._logger(`Preparing for user fix for change: ${changeId}`);
+        const changeToFix = this._state.pendingChanges.find(pc => pc.id === changeId && pc.status === 'failed');
+        if (changeToFix && changeToFix.applicationError) {
+            const originalChangeIndex = this.getOriginalChangeIndex(changeToFix);
+            const parsedChange = (originalChangeIndex !== undefined && this._state.parsedInput) ?
+                                 this._state.parsedInput.changes[originalChangeIndex] :
+                                 undefined; // Fallback if original index isn't available
+
+            if (parsedChange) { // Or if !parsedChange, reconstruct from PendingChange if needed
+                 this._updateState({
+                    batchProcessingStatus: 'awaiting_fix',
+                    failedChangeToFix: {
+                        changeId: changeToFix.id,
+                        error: changeToFix.applicationError,
+                        originalChange: parsedChange, // Use reconstructed if necessary
+                    },
+                });
+            } else {
+                 this._logger(`Could not find original ParsedChange for failed PendingChange: ${changeId}. Using data from PendingChange itself for context.`);
+                 // Fallback: use data from PendingChange to populate originalChange if ParsedChange is elusive
+                 const fallbackOriginalChange: ParsedChange = {
+                    file: changeToFix.file,
+                    action: changeToFix.action,
+                    target: changeToFix.target,
+                    code: changeToFix.code, // This is the *failed* code, which is what user needs to see
+                    class: changeToFix.class,
+                    description: changeToFix.description,
+                 };
+                 this._updateState({
+                    batchProcessingStatus: 'awaiting_fix',
+                    failedChangeToFix: {
+                        changeId: changeToFix.id,
+                        error: changeToFix.applicationError,
+                        originalChange: fallbackOriginalChange,
+                    },
+                });
+            }
+        } else {
+            this._logger(`Cannot prepare fix: Change ${changeId} not found or has no application error.`);
+        }
     }
-    
-    public hasErrors(): boolean {
-        return this._state.error !== null || 
-               this._state.globalValidationErrors.length > 0 ||
-               this._state.pendingChanges.some(change => 
-                   change.status === 'error' || 
-                   change.status === 'failed' || 
-                   change.status === 'validation_error'
-               );
+
+    private getOriginalChangeIndex(pendingChange: PendingChange): number | undefined {
+        return pendingChange.originalInputBlockIndex;
     }
-    
-    public getErrorChanges(): PendingChange[] {
-        return this._state.pendingChanges.filter(change => 
-            change.status === 'error' || 
-            change.status === 'failed' || 
-            change.status === 'validation_error'
+
+    public applyUserFix(changeId: string, newCodeBlock: string) {
+        this._logger(`Applying user fix for change: ${changeId}`);
+        let found = false;
+        const updatedPendingChanges = this._state.pendingChanges.map(pc => {
+            if (pc.id === changeId && (pc.status === 'failed' || pc.status === 'awaiting_fix')) {
+                found = true;
+                return {
+                    ...pc,
+                    code: newCodeBlock,
+                    status: 'queued' as PendingChangeStatus,
+                    applicationError: undefined,
+                    isValid: true,
+                };
+            }
+            return pc;
+        });
+
+        if (found) {
+            this._updateState({
+                pendingChanges: updatedPendingChanges,
+                batchProcessingStatus: 'processing',
+                failedChangeToFix: undefined,
+                processedInCurrentBatchAttempt: 0,
+                succeededInCurrentBatchAttempt: 0,
+            });
+        } else {
+            this._logger(`Could not apply fix: Change ${changeId} not in a fixable state.`);
+        }
+    }
+
+    public cancelBatchApplication(reason: string) {
+        this._logger(`Batch application cancelled: ${reason}`);
+        const revertedChanges = this._state.pendingChanges.map(pc => {
+            if (pc.status === 'queued' || pc.status === 'applying') {
+                // Revert to 'pending' if it was valid before, or 'validation_error' if it had pre-existing validation issues
+                return { ...pc, status: pc.isValid && pc.validationErrors.length === 0 ? 'pending' as PendingChangeStatus : 'validation_error' as PendingChangeStatus };
+            }
+            return pc;
+        });
+        this._updateState({
+            batchProcessingStatus: 'idle',
+            currentBatchId: undefined,
+            failedChangeToFix: undefined,
+            pendingChanges: revertedChanges,
+            isLoading: false,
+        });
+    }
+
+    public getChangeErrorForLLMPayload(changeId: string): FailedChangeExportPayload | null {
+        this._logger(`Getting error for LLM payload for change: ${changeId}`);
+        const failedChangeFromState = this._state.failedChangeToFix;
+
+        if (failedChangeFromState && failedChangeFromState.changeId === changeId) {
+            const originalBlock = this.reconstructChangeBlock(failedChangeFromState.originalChange);
+            return {
+                originalChangeBlock: originalBlock,
+                error: failedChangeFromState.error,
+                contextDescription: this._state.parsedInput?.description || "General code modification",
+                language: undefined, // TODO: Determine language
+            };
+        } else {
+            // Fallback if not in 'awaiting_fix' mode but error exists on a PendingChange
+            const pendingChangeWithError = this._state.pendingChanges.find(pc => pc.id === changeId && pc.applicationError);
+            if(pendingChangeWithError && pendingChangeWithError.applicationError) {
+                const originalChangeIndex = this.getOriginalChangeIndex(pendingChangeWithError);
+                 const originalParsedChange = (originalChangeIndex !== undefined && this._state.parsedInput) ?
+                                 this._state.parsedInput.changes[originalChangeIndex] :
+                                 undefined;
+                if(originalParsedChange) {
+                    const originalBlock = this.reconstructChangeBlock(originalParsedChange);
+                     return {
+                        originalChangeBlock: originalBlock,
+                        error: pendingChangeWithError.applicationError,
+                        contextDescription: this._state.parsedInput?.description || "General code modification",
+                        language: undefined,
+                    };
+                }
+            }
+        }
+        this._logger(`No suitable error found for LLM payload for change: ${changeId}`);
+        return null;
+    }
+
+    private reconstructChangeBlock(pc: ParsedChange): string {
+        let block = `CHANGE: ${pc.description || ''}\n`; // Ensure description is not undefined
+        block += `FILE: ${pc.file}\n`;
+        block += `ACTION: ${pc.action}\n`;
+        // Only add TARGET if it's meaningful and different from description, or if action requires it
+        if (pc.target && (pc.target !== pc.description || ChangeParser.actionRequiresTarget(pc.action))) {
+            block += `TARGET: ${pc.target}\n`;
+        }
+        if (pc.class) {
+            block += `CLASS: ${pc.class}\n`;
+        }
+        if (ChangeParser.actionRequiresCodeBlock(pc.action)) {
+            block += `---\n`;
+            block += `${pc.code || ''}\n`; // Ensure code is not undefined
+            block += `---`;
+        }
+        return block;
+    }
+
+    public updatePendingChangeValidationStatus(changeId: string, isValid: boolean, validationErrors: DetailedError[], validationWarnings: DetailedError[]) {
+        this._logger(`Updating validation status for change: ${changeId}`, { isValid });
+        const newChanges = this._state.pendingChanges.map(pc =>
+            pc.id === changeId ? {
+                ...pc,
+                isValid,
+                validationErrors,
+                validationWarnings,
+                status: isValid ? ('pending' as PendingChangeStatus) : ('validation_error' as PendingChangeStatus)
+            } : pc
         );
-    }
-    
-    // NEW: Validation-specific computed properties
-    public hasValidationErrors(): boolean {
-        return this._state.globalValidationErrors.length > 0 ||
-               this._state.pendingChanges.some(change => change.validationErrors.length > 0);
-    }
-    
-    public getValidChanges(): PendingChange[] {
-        return this._state.pendingChanges.filter(change => change.isValid);
-    }
-    
-    public getInvalidChanges(): PendingChange[] {
-        return this._state.pendingChanges.filter(change => !change.isValid);
-    }
-    
-    public getValidChangesCount(): number {
-        return this.getValidChanges().length;
-    }
-    
-    public getInvalidChangesCount(): number {
-        return this.getInvalidChanges().length;
-    }
-    
-    public hasOnlyValidChangesSelected(): boolean {
-        const selectedChanges = this.getSelectedChanges();
-        return selectedChanges.length > 0 && selectedChanges.every(change => change.isValid);
-    }
-    
-    public hasAnyInvalidChangesSelected(): boolean {
-        const selectedChanges = this.getSelectedChanges();
-        return selectedChanges.some(change => !change.isValid);
-    }
-    
-    public getValidationSummary(): string {
-        const totalChanges = this._state.pendingChanges.length;
-        const validChanges = this.getValidChangesCount();
-        const invalidChanges = this.getInvalidChangesCount();
-        const globalErrors = this._state.globalValidationErrors.length;
-        const globalWarnings = this._state.globalValidationWarnings.length;
-        
-        if (totalChanges === 0) {
-            return 'No changes to validate';
-        }
-        
-        let summary = `${validChanges}/${totalChanges} changes valid`;
-        
-        if (invalidChanges > 0) {
-            summary += `, ${invalidChanges} invalid`;
-        }
-        
-        if (globalErrors > 0 || globalWarnings > 0) {
-            summary += ` (${globalErrors} global errors, ${globalWarnings} warnings)`;
-        }
-        
-        return summary;
-    }
-    
-    // NEW: Bulk operations for validation
-    public markAllChangesAsValid() {
-        const newChanges = this._state.pendingChanges.map(change => ({
-            ...change,
-            validationErrors: [],
-            validationWarnings: [],
-            isValid: true,
-            status: change.status === 'validation_error' ? 'pending' as const : change.status
-        }));
-        
         this._updateState({ pendingChanges: newChanges });
     }
-    
-    public createPendingChangeFromParsed(parsedChange: ParsedChange, index: number): PendingChange {
+
+    public toggleChangeSelection(changeId: string, selected: boolean) {
+        this._logger(`Toggling selection for change: ${changeId} to ${selected}`);
+        const newChanges = this._state.pendingChanges.map(pc =>
+            pc.id === changeId ? { ...pc, selected } : pc
+        );
+        this._updateState({ pendingChanges: newChanges });
+    }
+
+    public createPendingChangeFromParsed(parsedChange: ParsedChange, index: number, _rawFullInput?: string): PendingChange {
         return {
-            id: `change-${Date.now()}-${index}-${Math.random().toString(36).substring(2, 7)}`,
+            id: `pc-${Date.now()}-${index}-${Math.random().toString(16).substring(2, 8)}`,
             file: parsedChange.file,
             action: parsedChange.action,
             target: parsedChange.target,
             code: parsedChange.code,
             class: parsedChange.class,
             description: parsedChange.description,
-            selected: true, // Default to selected
-            status: 'pending',
+            selected: true,
+            status: 'pending' as PendingChangeStatus,
             validationErrors: [],
             validationWarnings: [],
-            isValid: true // Assume valid until validation runs
+            applicationError: undefined,
+            isValid: true,
+            originalInputBlockIndex: index,
         };
     }
-    
-    // Debug helpers
-    public getStateSnapshot(): string {
-        return JSON.stringify({
-            inputLength: this._state.jsonInput.length,
-            hasParsedInput: !!this._state.parsedInput,
-            pendingChangesCount: this._state.pendingChanges.length,
-            selectedChangesCount: this._state.selectedChanges.length,
-            isLoading: this._state.isLoading,
-            validationInProgress: this._state.validationInProgress,
-            globalErrorsCount: this._state.globalValidationErrors.length,
-            globalWarningsCount: this._state.globalValidationWarnings.length,
-            validChangesCount: this.getValidChangesCount(),
-            invalidChangesCount: this.getInvalidChangesCount()
-        }, null, 2);
+
+    public setLoading(loading: boolean, operation?: 'parsing' | 'validating') {
+        this._logger(`Setting loading: ${loading}` + (operation ? ` for ${operation}` : ''));
+        let batchStatusUpdate: Partial<UIState> = {};
+        if (loading) {
+            if (operation === 'parsing') {
+                batchStatusUpdate.batchProcessingStatus = 'parsing';
+            } else if (operation === 'validating') {
+                batchStatusUpdate.batchProcessingStatus = 'validating';
+            }
+        } else {
+            if ((this._state.batchProcessingStatus === 'parsing' || this._state.batchProcessingStatus === 'validating')) {
+                 if (this._state.inputFormatValidationErrors.length === 0 && this._state.pendingChanges.every(pc => pc.isValid && pc.validationErrors.length === 0) ) {
+                    batchStatusUpdate.batchProcessingStatus = 'idle';
+                 }
+                 // If there are inputFormatValidationErrors, batchProcessingStatus will be set by setParsedInput
+                 // If there are individual validationErrors, it might stay 'validating' or move to 'idle' if user needs to fix them.
+                 // This logic might need refinement based on exact flow after validation completes.
+            }
+        }
+        this._updateState({ isLoading: loading, ...batchStatusUpdate });
+    }
+
+    public addToHistory(historyEntry: any) {
+        this._logger('Adding to history (placeholder).');
+        const newHistory = [...this._state.changeHistory, historyEntry];
+        this._updateState({ changeHistory: newHistory });
     }
 }
