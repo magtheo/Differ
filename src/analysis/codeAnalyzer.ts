@@ -1,8 +1,9 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { TreeSitterService } from './treeSitterService';
+import { DetailedError, ErrorCategories } from '../parser/inputParser';
 
-// --- NEW/UPDATED INTERFACES FOR POSITIONAL DATA ---
+// --- INTERFACES FOR POSITIONAL DATA ---
 
 /**
  * Represents a specific point in the source code, including line, column, and absolute character offset.
@@ -31,18 +32,17 @@ export interface ClassInfo extends SymbolInfo {
 }
 
 /**
- * The result of validating a specific target. On success, it can include the full SymbolInfo.
+ * The result of validating a specific target. Uses DetailedError for enhanced error reporting.
  */
 export interface TargetValidationResult {
     exists: boolean;
-    symbolInfo?: SymbolInfo | ClassInfo; // Return the full symbol on success
-    suggestions?: string[];
-    reason?: string;
+    symbolInfo?: SymbolInfo | ClassInfo;
+    error?: DetailedError; // Replaces reason and suggestions with rich error object
     confidence: 'high' | 'medium' | 'low';
 }
 
 /**
- * The result of analyzing a file, now containing lists of rich SymbolInfo objects.
+ * The result of analyzing a file, containing lists of rich SymbolInfo objects.
  */
 export interface FileAnalysisResult {
     fileExists: boolean;
@@ -50,15 +50,16 @@ export interface FileAnalysisResult {
     content?: string;
     language?: string;
     functions: SymbolInfo[];
-    classes: Map<string, ClassInfo>; // className -> ClassInfo
+    classes: Map<string, ClassInfo>;
     imports: SymbolInfo[];
     lineCount: number;
-    parseErrors?: string[];
-    tree?: any; // Tree from web-tree-sitter
+    parseErrors?: DetailedError[]; // Enhanced to use DetailedError
+    tree?: any;
 }
 
 export class CodeAnalyzer {
     private static _treeSitterService: TreeSitterService;
+    private static readonly MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB limit
 
     // Call this from extension.ts `activate`
     public static async initialize(context: vscode.ExtensionContext): Promise<void> {
@@ -66,8 +67,6 @@ export class CodeAnalyzer {
             this._treeSitterService = await TreeSitterService.create(context);
         }
     }
-
-    private static readonly MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB limit
 
     /**
      * Analyze a file and extract its structure using Tree-sitter.
@@ -81,11 +80,33 @@ export class CodeAnalyzer {
             try {
                 fileStat = await vscode.workspace.fs.stat(fullPath);
             } catch {
-                return { fileExists: false, isReadable: false, functions: [], classes: new Map(), imports: [], lineCount: 0 };
+                return { 
+                    fileExists: false, 
+                    isReadable: false, 
+                    functions: [], 
+                    classes: new Map(), 
+                    imports: [], 
+                    lineCount: 0 
+                };
             }
 
             if (fileStat.size > this.MAX_FILE_SIZE) {
-                return { fileExists: true, isReadable: false, functions: [], classes: new Map(), imports: [], lineCount: 0, parseErrors: [`File too large.`] };
+                const error = this.createDetailedError(
+                    ErrorCategories.FILE_ERROR_READ_FAILED,
+                    `File too large to analyze: ${filePath}`,
+                    `File size: ${fileStat.size} bytes, limit: ${this.MAX_FILE_SIZE} bytes`,
+                    ['Consider breaking the file into smaller modules.'],
+                    { filePath, fileSize: fileStat.size, limit: this.MAX_FILE_SIZE }
+                );
+                return { 
+                    fileExists: true, 
+                    isReadable: false, 
+                    functions: [], 
+                    classes: new Map(), 
+                    imports: [], 
+                    lineCount: 0, 
+                    parseErrors: [error] 
+                };
             }
 
             // Read file content
@@ -94,19 +115,57 @@ export class CodeAnalyzer {
             const language = this.getLanguageFromFile(filePath);
             const lineCount = content.split('\n').length;
             
-            // --- Tree-sitter parsing ---
+            // Tree-sitter parsing
             if (!this._treeSitterService) {
-                throw new Error("CodeAnalyzer's TreeSitterService not initialized.");
+                const error = this.createDetailedError(
+                    ErrorCategories.ANALYSIS_ERROR_TS_PARSE_FAILED,
+                    "CodeAnalyzer's TreeSitterService not initialized.",
+                    "Tree-sitter service must be initialized before analyzing files.",
+                    ['Ensure CodeAnalyzer.initialize() is called during extension activation.'],
+                    { filePath, language }
+                );
+                return { 
+                    fileExists: true, 
+                    isReadable: true, 
+                    content, 
+                    language, 
+                    functions: [], 
+                    classes: new Map(), 
+                    imports: [], 
+                    lineCount, 
+                    parseErrors: [error] 
+                };
             }
 
             const tree = this._treeSitterService.parse(content, language);
             if (!tree) {
-                return { fileExists: true, isReadable: true, content, language, functions: [], classes: new Map(), imports: [], lineCount, parseErrors: [`Failed to parse file with Tree-sitter for language '${language}'.`] };
+                const error = this.createDetailedError(
+                    ErrorCategories.ANALYSIS_ERROR_TS_PARSE_FAILED,
+                    `Failed to parse file with Tree-sitter for language '${language}'.`,
+                    `Tree-sitter could not generate an AST for the file content.`,
+                    [
+                        'Check if the file has syntax errors.',
+                        'Verify the file extension matches the content.',
+                        `Ensure ${language} grammar is supported.`
+                    ],
+                    { filePath, language, contentLength: content.length }
+                );
+                return { 
+                    fileExists: true, 
+                    isReadable: true, 
+                    content, 
+                    language, 
+                    functions: [], 
+                    classes: new Map(), 
+                    imports: [], 
+                    lineCount, 
+                    parseErrors: [error] 
+                };
             }
 
-            const functions = await this.extractSymbols(tree, language, 'functions');
-            const classAnalysis = await this.extractClassesWithMethods(tree, language);
-            const imports = await this.extractSymbols(tree, language, 'imports');
+            const functions = this.extractSymbols(tree, language, 'functions');
+            const classAnalysis = this.extractClassesWithMethods(tree, language);
+            const imports = this.extractSymbols(tree, language, 'imports');
 
             return {
                 fileExists: true,
@@ -121,74 +180,36 @@ export class CodeAnalyzer {
             };
 
         } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            return { fileExists: false, isReadable: false, functions: [], classes: new Map(), imports: [], lineCount: 0, parseErrors: [`Analysis failed: ${message}`] };
+            const detailedError = this.createDetailedError(
+                ErrorCategories.ANALYSIS_ERROR_TS_PARSE_FAILED,
+                `File analysis failed: ${filePath}`,
+                error instanceof Error ? error.message : String(error),
+                ['Check file permissions and syntax.'],
+                { filePath, error: error instanceof Error ? error.stack : error }
+            );
+            return { 
+                fileExists: false, 
+                isReadable: false, 
+                functions: [], 
+                classes: new Map(), 
+                imports: [], 
+                lineCount: 0, 
+                parseErrors: [detailedError] 
+            };
         }
     }
 
     /**
-     * A generic method to extract symbols based on a query. It now returns full SymbolInfo.
+     * Validate function existence with enhanced error reporting
      */
-    private static extractSymbols(tree: any, language: string, queryType: 'functions' | 'classes' | 'imports' | 'methods', contextNode?: any): SymbolInfo[] {
-        const captures = this._treeSitterService.query(tree, language, queryType);
-        const symbols: SymbolInfo[] = [];
-
-        for (const capture of captures) {
-            const nameNode = capture.node;
-            // The actual block we want to replace is the parent of the name identifier.
-            let symbolBlockNode = nameNode.parent;
-            // Check if the parent is part of an export statement, and if so, use the whole export statement.
-            if (symbolBlockNode?.parent?.type === 'export_statement') {
-                symbolBlockNode = symbolBlockNode.parent;
-            }
-
-            if (symbolBlockNode) {
-                // Check if we are within the specified context
-                if (contextNode && (symbolBlockNode.startIndex < contextNode.startIndex || symbolBlockNode.endIndex > contextNode.endIndex)) {
-                    continue;
-                }
-                
-                symbols.push({
-                    name: nameNode.text,
-                    start: {
-                        line: symbolBlockNode.startPosition.row + 1,
-                        column: symbolBlockNode.startPosition.column + 1,
-                        offset: symbolBlockNode.startIndex
-                    },
-                    end: {
-                        line: symbolBlockNode.endPosition.row + 1,
-                        column: symbolBlockNode.endPosition.column + 1,
-                        offset: symbolBlockNode.endIndex
-                    }
-                });
-            }
-        }
-        return symbols;
-    }
-
-    private static extractClassesWithMethods(tree: any, language: string): Map<string, ClassInfo> {
-        const classMap = new Map<string, ClassInfo>();
-        const classSymbols = this.extractSymbols(tree, language, 'classes');
-
-        for (const classSymbol of classSymbols) {
-            // To find the node for the class, we need to re-query and find the one that matches our symbol
-            const classNode = tree.rootNode.descendantForPosition(
-                { row: classSymbol.start.line - 1, column: classSymbol.start.column - 1 },
-                { row: classSymbol.end.line - 1, column: classSymbol.end.column - 1 }
-            );
-
-            if (classNode) {
-                const methods = this.extractSymbols(tree, language, 'methods', classNode);
-                classMap.set(classSymbol.name, { ...classSymbol, methods });
-            }
-        }
-        return classMap;
-    }
-
     public static async validateFunction(filePath: string, functionName: string, workspace: vscode.WorkspaceFolder): Promise<TargetValidationResult> {
         const analysis = await this.analyzeFile(filePath, workspace);
         if (!analysis.isReadable) {
-            return { exists: false, reason: analysis.parseErrors?.[0] || 'File cannot be read or parsed', confidence: 'high' };
+            return { 
+                exists: false, 
+                error: analysis.parseErrors?.[0] || this.createFileReadError(filePath), 
+                confidence: 'high' 
+            };
         }
         
         const func = analysis.functions.find(f => f.name === functionName);
@@ -197,34 +218,93 @@ export class CodeAnalyzer {
         }
         
         const suggestions = this.findSimilarNames(functionName, analysis.functions.map(f => f.name));
-        return { exists: false, reason: `Function "${functionName}" not found.`, confidence: 'high', suggestions };
+        const error = this.createDetailedError(
+            ErrorCategories.TARGET_ERROR_FUNCTION_NOT_FOUND,
+            `Function "${functionName}" not found in ${filePath}`,
+            `Searched ${analysis.functions.length} functions in the file.`,
+            suggestions.length > 0 ? 
+                [`Did you mean: ${suggestions.join(', ')}?`, 'Check function name spelling and case.'] :
+                ['Check function name spelling and case.', 'Ensure the function is declared in this file.'],
+            { 
+                filePath, 
+                targetFunction: functionName, 
+                availableFunctions: analysis.functions.map(f => f.name), 
+                suggestions 
+            }
+        );
+        
+        return { exists: false, error, confidence: 'high' };
     }
 
+    /**
+     * Validate method existence with enhanced error reporting
+     */
     public static async validateMethod(filePath: string, className: string, methodName: string, workspace: vscode.WorkspaceFolder): Promise<TargetValidationResult> {
         const analysis = await this.analyzeFile(filePath, workspace);
         if (!analysis.isReadable) {
-            return { exists: false, reason: analysis.parseErrors?.[0] || 'File cannot be read or parsed', confidence: 'high' };
+            return { 
+                exists: false, 
+                error: analysis.parseErrors?.[0] || this.createFileReadError(filePath), 
+                confidence: 'high' 
+            };
         }
 
         const classInfo = analysis.classes.get(className);
         if (!classInfo) {
             const suggestions = this.findSimilarNames(className, Array.from(analysis.classes.keys()));
-            return { exists: false, reason: `Class "${className}" not found.`, confidence: 'high', suggestions };
+            const error = this.createDetailedError(
+                ErrorCategories.TARGET_ERROR_CLASS_NOT_FOUND,
+                `Class "${className}" not found in ${filePath}`,
+                `Searched ${analysis.classes.size} classes in the file.`,
+                suggestions.length > 0 ? 
+                    [`Did you mean: ${suggestions.join(', ')}?`, 'Check class name spelling and case.'] :
+                    ['Check class name spelling and case.', 'Ensure the class is declared in this file.'],
+                { 
+                    filePath, 
+                    targetClass: className, 
+                    availableClasses: Array.from(analysis.classes.keys()), 
+                    suggestions 
+                }
+            );
+            return { exists: false, error, confidence: 'high' };
         }
 
         const methodInfo = classInfo.methods.find(m => m.name === methodName);
-        if(methodInfo) {
+        if (methodInfo) {
             return { exists: true, symbolInfo: methodInfo, confidence: 'high' };
         }
 
         const suggestions = this.findSimilarNames(methodName, classInfo.methods.map(m => m.name));
-        return { exists: false, reason: `Method "${methodName}" not found in class "${className}".`, confidence: 'high', suggestions };
+        const error = this.createDetailedError(
+            ErrorCategories.TARGET_ERROR_METHOD_NOT_FOUND,
+            `Method "${methodName}" not found in class "${className}"`,
+            `Class "${className}" has ${classInfo.methods.length} methods.`,
+            suggestions.length > 0 ? 
+                [`Did you mean: ${suggestions.join(', ')}?`, 'Check method name spelling and case.'] :
+                ['Check method name spelling and case.', 'Ensure the method is declared in this class.'],
+            { 
+                filePath, 
+                targetClass: className, 
+                targetMethod: methodName, 
+                availableMethods: classInfo.methods.map(m => m.name), 
+                suggestions 
+            }
+        );
+
+        return { exists: false, error, confidence: 'high' };
     }
 
+    /**
+     * Validate class existence with enhanced error reporting
+     */
     public static async validateClass(filePath: string, className: string, workspace: vscode.WorkspaceFolder): Promise<TargetValidationResult> {
         const analysis = await this.analyzeFile(filePath, workspace);
         if (!analysis.isReadable) {
-            return { exists: false, reason: analysis.parseErrors?.[0] || 'File cannot be read or parsed', confidence: 'high' };
+            return { 
+                exists: false, 
+                error: analysis.parseErrors?.[0] || this.createFileReadError(filePath), 
+                confidence: 'high' 
+            };
         }
         
         const classInfo = analysis.classes.get(className);
@@ -233,13 +313,35 @@ export class CodeAnalyzer {
         }
         
         const suggestions = this.findSimilarNames(className, Array.from(analysis.classes.keys()));
-        return { exists: false, reason: `Class "${className}" not found.`, confidence: 'high', suggestions };
+        const error = this.createDetailedError(
+            ErrorCategories.TARGET_ERROR_CLASS_NOT_FOUND,
+            `Class "${className}" not found in ${filePath}`,
+            `Searched ${analysis.classes.size} classes in the file.`,
+            suggestions.length > 0 ? 
+                [`Did you mean: ${suggestions.join(', ')}?`, 'Check class name spelling and case.'] :
+                ['Check class name spelling and case.', 'Ensure the class is declared in this file.'],
+            { 
+                filePath, 
+                targetClass: className, 
+                availableClasses: Array.from(analysis.classes.keys()), 
+                suggestions 
+            }
+        );
+        
+        return { exists: false, error, confidence: 'high' };
     }
 
+    /**
+     * Validate import existence with enhanced error reporting
+     */
     public static async validateImport(filePath: string, importName: string, workspace: vscode.WorkspaceFolder): Promise<TargetValidationResult> {
         const analysis = await this.analyzeFile(filePath, workspace);
         if (!analysis.isReadable) {
-            return { exists: false, reason: analysis.parseErrors?.[0] || 'File cannot be read or parsed', confidence: 'high' };
+            return { 
+                exists: false, 
+                error: analysis.parseErrors?.[0] || this.createFileReadError(filePath), 
+                confidence: 'high' 
+            };
         }
         
         const imp = analysis.imports.find(i => i.name === importName);
@@ -248,12 +350,22 @@ export class CodeAnalyzer {
         }
         
         const suggestions = this.findSimilarNames(importName, analysis.imports.map(i => i.name));
-        return { 
-            exists: false, 
-            reason: `Import "${importName}" not found.`, 
-            confidence: 'high', 
-            suggestions
-        };
+        const error = this.createDetailedError(
+            ErrorCategories.TARGET_ERROR_NOT_FOUND,
+            `Import "${importName}" not found in ${filePath}`,
+            `Searched ${analysis.imports.length} imports in the file.`,
+            suggestions.length > 0 ? 
+                [`Did you mean: ${suggestions.join(', ')}?`, 'Check import name spelling.'] :
+                ['Check import name spelling.', 'Ensure the import statement exists.'],
+            { 
+                filePath, 
+                targetImport: importName, 
+                availableImports: analysis.imports.map(i => i.name), 
+                suggestions 
+            }
+        );
+        
+        return { exists: false, error, confidence: 'high' };
     }
 
     /**
@@ -267,12 +379,15 @@ export class CodeAnalyzer {
         const analysis = await this.analyzeFile(filePath, workspace);
         if (!analysis.isReadable || !analysis.tree) {
             console.log('❌ File not readable or no tree');
-            return { exists: false, reason: analysis.parseErrors?.[0] || 'File cannot be read or parsed', confidence: 'high' };
+            return { 
+                exists: false, 
+                error: analysis.parseErrors?.[0] || this.createFileReadError(filePath), 
+                confidence: 'high' 
+            };
         }
         
         console.log('✅ File analysis complete, looking for node...');
         
-        // First, let's see if we can find it manually for comparison
         const fileContent = analysis.content || '';
         const manualIndex = fileContent.indexOf(targetText.trim());
         if (manualIndex >= 0) {
@@ -281,7 +396,6 @@ export class CodeAnalyzer {
         } else {
             console.log('❌ Target NOT found manually');
             
-            // If it's an enum, let's see if we can find it without the export keyword
             if (targetText.includes('enum ')) {
                 const enumNameMatch = targetText.match(/enum\s+(\w+)/);
                 if (enumNameMatch) {
@@ -302,19 +416,12 @@ export class CodeAnalyzer {
             console.log('   End:', node.endIndex);
             console.log('   Text length:', node.text.length);
             
-            // CRITICAL: Let's see what content is actually at these positions
             const actualContent = fileContent.substring(node.startIndex, node.endIndex);
             console.log('📄 ACTUAL CONTENT FROM NODE:');
             console.log('---START---');
             console.log(actualContent);
             console.log('---END---');
             
-            console.log('📄 TARGET CONTENT:');
-            console.log('---START---'); 
-            console.log(targetText);
-            console.log('---END---');
-            
-            // Validate that the node content actually matches what we're looking for
             const normalizedActual = actualContent.trim();
             const normalizedTarget = targetText.trim();
             
@@ -347,24 +454,94 @@ export class CodeAnalyzer {
         
         console.log('❌ No node found');
         const suggestions = this.findSimilarText(targetText, fileContent);
-        return { 
-            exists: false, 
-            reason: `Code block starting with "${targetText.substring(0, 30)}..." not found as a distinct syntax node.`, 
-            confidence: 'high',
-            suggestions
-        };
+        const error = this.createDetailedError(
+            ErrorCategories.TARGET_ERROR_BLOCK_NOT_FOUND,
+            `Code block not found as a distinct syntax node`,
+            `Could not locate a syntax tree node matching the target text: "${targetText.substring(0, 50)}${targetText.length > 50 ? '...' : ''}"`,
+            suggestions.length > 0 ? 
+                [`Similar text found: ${suggestions.join(', ')}`, 'Ensure the target is an exact copy from the file.'] :
+                ['Ensure the target is an exact copy from the file.', 'Check for extra whitespace or formatting differences.'],
+            { 
+                filePath, 
+                targetText: targetText.substring(0, 200), 
+                suggestions,
+                searchMethod: 'tree-sitter AST traversal'
+            }
+        );
+        
+        return { exists: false, error, confidence: 'high' };
     }
-    
+
+    // --- PRIVATE HELPER METHODS ---
+
     /**
-     * Improved method to find a syntax node that matches the given text.
-     * This version better handles enum blocks and other structured code.
+     * Extract symbols using Tree-sitter queries
+     */
+    private static extractSymbols(tree: any, language: string, queryType: 'functions' | 'classes' | 'imports' | 'methods', contextNode?: any): SymbolInfo[] {
+        const captures = this._treeSitterService.query(tree, language, queryType);
+        const symbols: SymbolInfo[] = [];
+
+        for (const capture of captures) {
+            const nameNode = capture.node;
+            let symbolBlockNode = nameNode.parent;
+            
+            if (symbolBlockNode?.parent?.type === 'export_statement') {
+                symbolBlockNode = symbolBlockNode.parent;
+            }
+
+            if (symbolBlockNode) {
+                if (contextNode && (symbolBlockNode.startIndex < contextNode.startIndex || symbolBlockNode.endIndex > contextNode.endIndex)) {
+                    continue;
+                }
+                
+                symbols.push({
+                    name: nameNode.text,
+                    start: {
+                        line: symbolBlockNode.startPosition.row + 1,
+                        column: symbolBlockNode.startPosition.column + 1,
+                        offset: symbolBlockNode.startIndex
+                    },
+                    end: {
+                        line: symbolBlockNode.endPosition.row + 1,
+                        column: symbolBlockNode.endPosition.column + 1,
+                        offset: symbolBlockNode.endIndex
+                    }
+                });
+            }
+        }
+        return symbols;
+    }
+
+    /**
+     * Extract classes with their methods
+     */
+    private static extractClassesWithMethods(tree: any, language: string): Map<string, ClassInfo> {
+        const classMap = new Map<string, ClassInfo>();
+        const classSymbols = this.extractSymbols(tree, language, 'classes');
+
+        for (const classSymbol of classSymbols) {
+            const classNode = tree.rootNode.descendantForPosition(
+                { row: classSymbol.start.line - 1, column: classSymbol.start.column - 1 },
+                { row: classSymbol.end.line - 1, column: classSymbol.end.column - 1 }
+            );
+
+            if (classNode) {
+                const methods = this.extractSymbols(tree, language, 'methods', classNode);
+                classMap.set(classSymbol.name, { ...classSymbol, methods });
+            }
+        }
+        return classMap;
+    }
+
+    /**
+     * Find AST node by text content with enhanced matching strategies
      */
     private static findNodeByText(tree: any, text: string): any | undefined {
         console.log('🔍 FIND NODE BY TEXT CALLED');
         console.log('   Text length:', text.length);
         console.log('   Text preview:', text.substring(0, 100));
         
-        // First, try to find by structural pattern (most reliable)
+        // Try structural pattern match first
         console.log('🏗️ Trying structural pattern match...');
         let bestMatch = this.findStructuralMatch(tree, text);
         if (bestMatch) {
@@ -373,7 +550,7 @@ export class CodeAnalyzer {
         }
         console.log('❌ No structural match found');
 
-        // If no structural match, try exact text match
+        // Try exact text match
         console.log('🎯 Trying exact text match...');
         bestMatch = this.findExactTextMatch(tree, text);
         if (bestMatch) {
@@ -382,24 +559,16 @@ export class CodeAnalyzer {
         }
         console.log('❌ No exact text match found');
 
-        // Fallback to fuzzy matching (least reliable)
+        // Fallback to fuzzy matching
         console.log('🔍 Trying fuzzy text match...');
         bestMatch = this.findFuzzyTextMatch(tree, text);
         if (bestMatch) {
             console.log('⚠️ FUZZY MATCH FOUND:', bestMatch.type, bestMatch.startIndex, bestMatch.endIndex);
             
-            // Additional validation for fuzzy matches
             const nodeText = bestMatch.text;
             const normalizedTarget = this.normalizeCode(text);
             const normalizedNode = this.normalizeCode(nodeText);
             
-            console.log('🔍 Fuzzy match validation:');
-            console.log('   Node text length:', nodeText.length);
-            console.log('   Target text length:', text.length);
-            console.log('   Normalized node length:', normalizedNode.length);
-            console.log('   Normalized target length:', normalizedTarget.length);
-            
-            // Check if the fuzzy match is actually reasonable
             if (normalizedNode.includes(normalizedTarget) && nodeText.length < text.length * 3) {
                 console.log('✅ Fuzzy match accepted');
                 return bestMatch;
@@ -420,11 +589,9 @@ export class CodeAnalyzer {
         const normalizedTarget = this.normalizeCode(targetText);
         let bestMatch: any | undefined;
 
-        // Use arrow function to preserve 'this' context
         const walk = (node: any): void => {
             const normalizedNodeText = this.normalizeCode(node.text);
             
-            // Exact match
             if (normalizedNodeText === normalizedTarget) {
                 if (!bestMatch || node.text.length < bestMatch.text.length) {
                     console.log('✅ EXACT TEXT MATCH FOUND:', node.type, node.startIndex, node.endIndex);
@@ -432,11 +599,9 @@ export class CodeAnalyzer {
                 }
             }
             
-            // For CSS: Also check if we're looking for a selector and this is a rule_set
             if (node.type === 'rule_set' && targetText.trim().endsWith('{')) {
                 const selectorPart = targetText.replace(/\s*\{.*$/, '').trim();
                 
-                // Check if any selector in this rule matches
                 for (const child of node.children) {
                     if (child.type === 'selectors') {
                         for (const selector of child.children) {
@@ -459,15 +624,13 @@ export class CodeAnalyzer {
         return bestMatch;
     }
 
-
     /**
-     * Fallback fuzzy matching (original implementation)
+     * Fallback fuzzy matching
      */
     private static findFuzzyTextMatch(tree: any, text: string): any | undefined {
         const targetNormalized = this.normalizeCode(text);
         let bestMatch: any | undefined;
 
-        // Use arrow function to preserve context
         const walk = (node: any): void => {
             const nodeTextNormalized = this.normalizeCode(node.text);
 
@@ -492,75 +655,27 @@ export class CodeAnalyzer {
         return bestMatch;
     }
 
-
     /**
-     * Normalize code for comparison by removing extra whitespace and formatting
-     */
-    private static normalizeCode(code: string): string {
-        return code
-            .replace(/\/\*[\s\S]*?\*\//g, '')  // Remove CSS comments
-            .replace(/\s+/g, ' ')              // Replace all whitespace with single spaces
-            .replace(/\s*{\s*/g, '{')          // Remove spaces around opening braces
-            .replace(/\s*}\s*/g, '}')          // Remove spaces around closing braces
-            .replace(/\s*;\s*/g, ';')          // Remove spaces around semicolons
-            .replace(/\s*,\s*/g, ',')          // Remove spaces around commas
-            .replace(/\s*=\s*/g, '=')          // Remove spaces around equals
-            .replace(/\s*:\s*/g, ':')          // Remove spaces around colons (CSS properties)
-            .trim();
-    }
-
-    // Helper methods (getLanguageFromFile, findSimilarNames, levenshteinDistance) remain unchanged.
-    private static getLanguageFromFile(filePath: string): string {
-        const ext = path.extname(filePath).toLowerCase();
-        const languageMap: { [key:string]: string } = {
-            '.js': 'javascript', 
-            '.ts': 'typescript', 
-            '.py': 'python', 
-            '.rs': 'rust',
-            '.css': 'css',
-            '.scss': 'css',  
-            '.less': 'css'
-        };
-        return languageMap[ext] || 'unknown';
-    }
-
-    private static findSimilarNames(target: string, candidates: string[], maxSuggestions = 3): string[] {
-        const similarities = candidates.map(candidate => ({
-            name: candidate,
-            score: this.calculateSimilarity(target.toLowerCase(), candidate.toLowerCase())
-        }))
-        .filter(item => item.score > 0.4)
-        .sort((a, b) => b.score - a.score)
-        .slice(0, maxSuggestions);
-        
-        return similarities.map(item => item.name);
-    }
-
-    /**
-     * Find node by structural pattern (e.g., enum declarations, class definitions, CSS rules)
+     * Find node by structural pattern (e.g., enum declarations, function definitions, CSS rules)
      */
     private static findStructuralMatch(tree: any, targetText: string): any | undefined {
         console.log('🔍 Looking for structural match for:', targetText.substring(0, 50));
         
-        // Check if target is an enum declaration
         if (targetText.includes('enum ')) {
             console.log('🎯 Target appears to be an enum, using enum-specific search');
             return this.findEnumDeclaration(tree, targetText);
         }
         
-        // Check if target is a function
         if (targetText.includes('function ') || targetText.match(/^\s*(async\s+)?function\s+\w+/)) {
             console.log('🎯 Target appears to be a function, using function-specific search');
             return this.findFunctionDeclaration(tree, targetText);
         }
         
-        // NEW: Check if target is a CSS rule (selector + block)
         if (targetText.trim().match(/^[a-zA-Z#.][a-zA-Z0-9-_#.:,\s]*\s*\{[\s\S]*\}$/)) {
             console.log('🎯 Target appears to be a complete CSS rule, using CSS rule search');
             return this.findCSSRule(tree, targetText);
         }
         
-        // NEW: Check if target is just a CSS selector
         if (targetText.trim().match(/^[a-zA-Z#.][a-zA-Z0-9-_#.:,\s]*\s*\{?\s*$/)) {
             console.log('🎯 Target appears to be a CSS selector, using CSS selector search');
             return this.findCSSRuleBySelector(tree, targetText);
@@ -570,24 +685,17 @@ export class CodeAnalyzer {
         return undefined;
     }
 
-    /**
-     * Find complete CSS rule by matching the entire rule content
-     */
+    // CSS-specific search methods
     private static findCSSRule(tree: any, targetText: string): any | undefined {
         console.log('🎯 FIND CSS RULE - Looking for complete rule');
         
         function walk(node: any): any | undefined {
             if (node.type === 'rule_set') {
-                // Normalize both target and node text for comparison
                 const normalizedTarget = targetText.replace(/\s+/g, ' ').trim();
                 const normalizedNode = node.text.replace(/\s+/g, ' ').trim();
                 
-                // Check if this rule matches the target structure
                 if (normalizedNode.includes(normalizedTarget.substring(0, 50))) {
                     console.log('✅ Found potential CSS rule match');
-                    console.log('   Node text length:', node.text.length);
-                    console.log('   Target length:', targetText.length);
-                    console.log('   Node text preview:', node.text.substring(0, 100));
                     return node;
                 }
             }
@@ -603,43 +711,19 @@ export class CodeAnalyzer {
         return walk(tree.rootNode);
     }
 
-    /**
-     * Find CSS rule by selector name (for targets like "body" or "body {")
-     */
     private static findCSSRuleBySelector(tree: any, targetText: string): any | undefined {
-        // Extract selector name from target
         const selectorMatch = targetText.trim().replace(/\s*\{.*$/, '').trim();
         console.log('🎯 FIND CSS RULE BY SELECTOR - Looking for selector:', selectorMatch);
         
         function walk(node: any): any | undefined {
             if (node.type === 'rule_set') {
-                console.log('🔍 Examining rule_set node');
-                
-                // Look for selectors within this rule
                 for (const child of node.children) {
                     if (child.type === 'selectors') {
-                        console.log('   Found selectors node');
-                        
-                        // Check all selectors within this selectors node
                         for (const selector of child.children) {
-                            console.log('     Checking selector type:', selector.type, 'text:', selector.text);
-                            
-                            // Handle different types of selectors
-                            if ((selector.type === 'tag_name' || selector.type === 'type_selector') && 
+                            if ((selector.type === 'tag_name' || selector.type === 'type_selector' || 
+                                 selector.type === 'class_selector' || selector.type === 'id_selector') && 
                                 selector.text === selectorMatch) {
-                                console.log('✅ Found CSS rule for tag selector:', selectorMatch);
-                                return node; // Return the entire rule_set
-                            }
-                            
-                            if (selector.type === 'class_selector' && 
-                                selector.text === selectorMatch) {
-                                console.log('✅ Found CSS rule for class selector:', selectorMatch);
-                                return node;
-                            }
-                            
-                            if (selector.type === 'id_selector' && 
-                                selector.text === selectorMatch) {
-                                console.log('✅ Found CSS rule for id selector:', selectorMatch);
+                                console.log('✅ Found CSS rule for selector:', selectorMatch);
                                 return node;
                             }
                         }
@@ -655,22 +739,10 @@ export class CodeAnalyzer {
             return undefined;
         }
         
-        const result = walk(tree.rootNode);
-        if (result) {
-            console.log('✅ CSS rule found for selector:', selectorMatch);
-            console.log('   Rule starts at:', result.startIndex);
-            console.log('   Rule ends at:', result.endIndex);
-            console.log('   Rule text:', result.text.substring(0, 100) + '...');
-        } else {
-            console.log('❌ No CSS rule found for selector:', selectorMatch);
-        }
-        
-        return result;
+        return walk(tree.rootNode);
     }
 
-    /**
-     * Find function declaration by name
-     */
+    // Function and enum specific search methods
     private static findFunctionDeclaration(tree: any, targetText: string): any | undefined {
         const functionNameMatch = targetText.match(/function\s+(\w+)/);
         if (!functionNameMatch) {
@@ -690,9 +762,7 @@ export class CodeAnalyzer {
             
             for (const child of node.children) {
                 const result = walk(child);
-                if (result) {
-                    return result;
-                }
+                if (result) return result;
             }
             
             return undefined;
@@ -701,47 +771,9 @@ export class CodeAnalyzer {
         return walk(tree.rootNode);
     }
 
-    /**
-     * Find class declaration by name
-     */
-    private static findClassDeclaration(tree: any, targetText: string): any | undefined {
-        const classNameMatch = targetText.match(/class\s+(\w+)/);
-        if (!classNameMatch) {
-            return undefined;
-        }
-        
-        const className = classNameMatch[1];
-        
-        function walk(node: any): any | undefined {
-            if (node.type === 'class_declaration') {
-                for (const child of node.children) {
-                    if (child.type === 'identifier' && child.text === className) {
-                        return node;
-                    }
-                }
-            }
-            
-            for (const child of node.children) {
-                const result = walk(child);
-                if (result) {
-                    return result;
-                }
-            }
-            
-            return undefined;
-        }
-        
-        return walk(tree.rootNode);
-    }
-
-        
-    /**
-     * Find enum declaration by name and structure
-     */
     private static findEnumDeclaration(tree: any, targetText: string): any | undefined {
         console.log('🏗️ FIND ENUM DECLARATION CALLED');
         
-        // Extract enum name from target text
         const enumNameMatch = targetText.match(/enum\s+(\w+)/);
         if (!enumNameMatch) {
             console.log('❌ No enum name found in target text');
@@ -755,45 +787,29 @@ export class CodeAnalyzer {
         function walk(node: any, depth: number = 0): any | undefined {
             const indent = '  '.repeat(depth);
             
-            // Check if this is an export_statement containing an enum
             if (node.type === 'export_statement') {
                 console.log(`${indent}📤 Found export_statement at depth ${depth}`);
-                console.log(`${indent}   startIndex: ${node.startIndex}`);
-                console.log(`${indent}   endIndex: ${node.endIndex}`);
-                console.log(`${indent}   text preview: ${node.text.substring(0, 100)}...`);
                 
-                // Look for enum_declaration within the export_statement
                 for (const child of node.children) {
                     if (child.type === 'enum_declaration') {
                         console.log(`${indent}   📋 Found enum_declaration inside export_statement`);
                         
-                        // Check if this enum has the right name
                         for (const enumChild of child.children) {
                             if (enumChild.type === 'identifier' && enumChild.text === enumName) {
                                 console.log(`${indent}   ✅ EXPORTED ENUM NAME MATCH FOUND!`);
-                                console.log(`${indent}   Returning export_statement (full declaration) with:`);
-                                console.log(`${indent}     startIndex: ${node.startIndex}`);
-                                console.log(`${indent}     endIndex: ${node.endIndex}`);
-                                console.log(`${indent}     full text: ${node.text}`);
-                                return node; // Return the entire export_statement, not just the enum
+                                return node;
                             }
                         }
                     }
                 }
             }
             
-            // Also check for standalone enum declarations (non-exported)
             if (node.type === 'enum_declaration') {
                 console.log(`${indent}📋 Found standalone enum_declaration at depth ${depth}`);
-                console.log(`${indent}   startIndex: ${node.startIndex}`);
-                console.log(`${indent}   endIndex: ${node.endIndex}`);
-                console.log(`${indent}   text preview: ${node.text.substring(0, 100)}...`);
                 
-                // Check children for identifier
                 for (const child of node.children) {
                     if (child.type === 'identifier' && child.text === enumName) {
                         console.log(`${indent}   ✅ STANDALONE ENUM NAME MATCH FOUND!`);
-                        // Only return this if the target doesn't start with 'export'
                         if (!targetText.trim().startsWith('export')) {
                             console.log(`${indent}   Returning standalone enum node`);
                             return node;
@@ -804,12 +820,9 @@ export class CodeAnalyzer {
                 }
             }
             
-            // Continue walking
             for (const child of node.children) {
                 const result = walk(child, depth + 1);
-                if (result) {
-                    return result;
-                }
+                if (result) return result;
             }
             
             return undefined;
@@ -827,10 +840,56 @@ export class CodeAnalyzer {
         return result;
     }
 
-
-        
     /**
-     * Finds lines in content that are similar to the target text snippet.
+     * Normalize code for comparison by removing extra whitespace and formatting
+     */
+    private static normalizeCode(code: string): string {
+        return code
+            .replace(/\/\*[\s\S]*?\*\//g, '')  // Remove CSS comments
+            .replace(/\s+/g, ' ')              // Replace all whitespace with single spaces
+            .replace(/\s*{\s*/g, '{')          // Remove spaces around opening braces
+            .replace(/\s*}\s*/g, '}')          // Remove spaces around closing braces
+            .replace(/\s*;\s*/g, ';')          // Remove spaces around semicolons
+            .replace(/\s*,\s*/g, ',')          // Remove spaces around commas
+            .replace(/\s*=\s*/g, '=')          // Remove spaces around equals
+            .replace(/\s*:\s*/g, ':')          // Remove spaces around colons (CSS properties)
+            .trim();
+    }
+
+    /**
+     * Get language from file extension
+     */
+    private static getLanguageFromFile(filePath: string): string {
+        const ext = path.extname(filePath).toLowerCase();
+        const languageMap: { [key: string]: string } = {
+            '.js': 'javascript', 
+            '.ts': 'typescript', 
+            '.py': 'python', 
+            '.rs': 'rust',
+            '.css': 'css',
+            '.scss': 'css',  
+            '.less': 'css'
+        };
+        return languageMap[ext] || 'unknown';
+    }
+
+    /**
+     * Find similar names using string similarity
+     */
+    private static findSimilarNames(target: string, candidates: string[], maxSuggestions = 3): string[] {
+        const similarities = candidates.map(candidate => ({
+            name: candidate,
+            score: this.calculateSimilarity(target.toLowerCase(), candidate.toLowerCase())
+        }))
+        .filter(item => item.score > 0.4)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, maxSuggestions);
+        
+        return similarities.map(item => item.name);
+    }
+
+    /**
+     * Find similar text lines in content
      */
     private static findSimilarText(target: string, content: string, maxSuggestions = 3): string[] {
         if (!content) return [];
@@ -843,7 +902,7 @@ export class CodeAnalyzer {
         for (const line of lines) {
             const trimmedLine = line.trim();
             if (trimmedLine.length > 5 && trimmedLine.includes(targetFirstLine)) {
-                suggestions.push(trimmedLine.substring(0, 100)); // Push a snippet
+                suggestions.push(trimmedLine.substring(0, 100));
                 if (suggestions.length >= maxSuggestions) {
                     break;
                 }
@@ -852,6 +911,9 @@ export class CodeAnalyzer {
         return suggestions;
     }
 
+    /**
+     * Calculate string similarity using Levenshtein distance
+     */
     private static calculateSimilarity(a: string, b: string): number {
         const longer = a.length > b.length ? a : b;
         const shorter = a.length > b.length ? b : a;
@@ -864,6 +926,9 @@ export class CodeAnalyzer {
         return (longer.length - editDistance) / longer.length;
     }
 
+    /**
+     * Calculate Levenshtein distance between two strings
+     */
     private static levenshteinDistance(a: string, b: string): number {
         const matrix = Array(b.length + 1).fill(null).map(() => Array(a.length + 1).fill(null));
 
@@ -887,11 +952,47 @@ export class CodeAnalyzer {
 
         return matrix[b.length][a.length];
     }
+
+    /**
+     * Create a standardized DetailedError object
+     */
+    private static createDetailedError(
+        code: string,
+        message: string,
+        details: string,
+        suggestions: string[] = [],
+        context?: any
+    ): DetailedError {
+        return {
+            code,
+            message,
+            details,
+            suggestions,
+            context
+        };
+    }
+
+    /**
+     * Create a standard file read error
+     */
+    private static createFileReadError(filePath: string): DetailedError {
+        return this.createDetailedError(
+            ErrorCategories.FILE_ERROR_READ_FAILED,
+            `Cannot read file: ${filePath}`,
+            'File may not exist, be inaccessible, or have permission restrictions.',
+            [
+                'Check if the file exists in the workspace.',
+                'Verify file permissions.',
+                'Ensure the file path is correct.'
+            ],
+            { filePath }
+        );
+    }
 }
 
 /**
-* Helper function to convert a 0-based offset to a 1-based line and column Position object
-*/
+ * Helper function to convert a 0-based offset to a 1-based line and column Position object
+ */
 export function offsetToPosition(content: string, offset: number): Position {
     if (offset < 0) offset = 0;
     if (offset > content.length) offset = content.length;
